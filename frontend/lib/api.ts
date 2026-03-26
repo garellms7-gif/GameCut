@@ -1,4 +1,9 @@
-import type { AnalysisResult, FeedbackPayload, FeedbackResponse } from "./types";
+import type {
+  AnalysisResult,
+  FeedbackPayload,
+  FeedbackResponse,
+  PresetDetectionResult,
+} from "./types";
 
 const API_BASE = "/api";
 
@@ -36,6 +41,23 @@ export async function analyzeVideo(
 export async function fetchPresets(): Promise<Record<string, { name: string; description: string }>> {
   const res = await fetch(`${API_BASE}/presets`);
   if (!res.ok) throw new Error("Failed to load presets");
+  return res.json();
+}
+
+export async function detectPreset(file: File): Promise<PresetDetectionResult> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API_BASE}/detect-preset`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Preset detection failed");
+  }
+
   return res.json();
 }
 

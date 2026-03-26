@@ -106,6 +106,20 @@ export interface AnalysisResult {
   threshold_adjustments?: Record<string, ThresholdAdjustment>;
 }
 
+export interface PresetSignals {
+  audio_energy_db: number;
+  spectral_centroid_norm: number;
+  frame_change_rate: number;
+  color_saturation_mean: number;
+}
+
+export interface PresetDetectionResult {
+  detected_preset: GamePreset;
+  confidence: number;
+  scores: Record<GamePreset, number>;
+  signals: PresetSignals;
+}
+
 export interface AnalysisState {
   status: "idle" | "uploading" | "analyzing" | "done" | "error";
   progress: number;

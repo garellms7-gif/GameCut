@@ -27,6 +27,7 @@ from modules.corrections import (
 from modules.dead_zone import detect_dead_zones, detect_struggle_zones
 from modules.hype_moment import detect_hype_moments
 from modules.edl_export import build_edl, to_json, to_csv, to_edl
+from modules.preset_detector import detect_preset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -101,6 +102,45 @@ def root():
 def get_presets():
     """Return available game presets."""
     return PRESETS
+
+
+@app.post("/detect-preset")
+async def detect_preset_endpoint(
+    file: UploadFile = File(..., description="Gameplay video file"),
+):
+    """
+    Analyse the first 90 seconds of a video and classify it into a game preset.
+
+    Examines four audio-visual signals:
+      - audio_energy_db       : mean programme loudness
+      - spectral_centroid_norm: audio brightness (bass vs. treble balance)
+      - frame_change_rate     : camera / action dynamics
+      - color_saturation_mean : art style vibrancy
+
+    Returns the best-matching preset plus a full confidence distribution so the
+    UI can show scores for all presets and let the user override the suggestion.
+    """
+    suffix   = Path(file.filename or "upload.mp4").suffix or ".mp4"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(await file.read())
+
+        logger.info("Detecting preset for %r", file.filename)
+        result = detect_preset(tmp_path)
+        logger.info(
+            "Detected preset=%s confidence=%.2f signals=%s",
+            result["detected_preset"], result["confidence"], result["signals"],
+        )
+        return JSONResponse(content=result)
+
+    except Exception as e:
+        logger.exception("Preset detection failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @app.post("/analyze")
