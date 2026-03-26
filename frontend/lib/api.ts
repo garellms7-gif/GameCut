@@ -1,4 +1,4 @@
-import type { AnalysisResult } from "./types";
+import type { AnalysisResult, FeedbackPayload, FeedbackResponse } from "./types";
 
 const API_BASE = "/api";
 
@@ -36,6 +36,31 @@ export async function analyzeVideo(
 export async function fetchPresets(): Promise<Record<string, { name: string; description: string }>> {
   const res = await fetch(`${API_BASE}/presets`);
   if (!res.ok) throw new Error("Failed to load presets");
+  return res.json();
+}
+
+export async function submitFeedback(
+  payload: FeedbackPayload,
+): Promise<FeedbackResponse> {
+  const form = new FormData();
+  form.append("preset", payload.preset);
+  form.append("segment_type", payload.segment_type);
+  form.append("vote", payload.vote);
+  form.append("duration", String(payload.duration));
+  if (payload.score !== null) {
+    form.append("score", String(payload.score));
+  }
+
+  const res = await fetch(`${API_BASE}/feedback`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Feedback submission failed");
+  }
+
   return res.json();
 }
 

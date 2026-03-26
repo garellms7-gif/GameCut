@@ -1,28 +1,69 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Timeline } from "@/components/Timeline";
-import { formatTime } from "@/lib/api";
-import type { AnalysisResult } from "@/lib/types";
+import { formatTime, submitFeedback } from "@/lib/api";
+import type {
+  AnalysisResult,
+  FeedbackVote,
+  Highlight,
+  ThresholdAdjustment,
+} from "@/lib/types";
 
 export default function ResultsPage() {
   const router = useRouter();
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [activeTab, setActiveTab] = useState<"timeline" | "highlights" | "cuts">("timeline");
+  // Map of segmentKey → "up" | "down" to track which segments have been voted on
+  const [votes, setVotes] = useState<Map<string, FeedbackVote>>(new Map());
+  // Toast message
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     const raw = sessionStorage.getItem("gc_result");
-    if (!raw) {
-      router.push("/");
-      return;
-    }
-    try {
-      setResult(JSON.parse(raw));
-    } catch {
-      router.push("/");
-    }
+    if (!raw) { router.push("/"); return; }
+    try { setResult(JSON.parse(raw)); }
+    catch { router.push("/"); }
   }, [router]);
+
+  const showToast = (msg: string, ok: boolean) => {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 2800);
+  };
+
+  const handleVote = useCallback(
+    async (
+      segmentKey: string,
+      vote: FeedbackVote,
+      segmentType: "dead_zone" | "highlight",
+      score: number | null,
+      duration: number,
+    ) => {
+      if (!result) return;
+      // Optimistically mark as voted
+      setVotes((prev) => new Map(prev).set(segmentKey, vote));
+      try {
+        const res = await submitFeedback({
+          preset: result.preset,
+          segment_type: segmentType,
+          vote,
+          score,
+          duration,
+        });
+        showToast(res.message, true);
+      } catch (e: unknown) {
+        // Roll back on error
+        setVotes((prev) => {
+          const next = new Map(prev);
+          next.delete(segmentKey);
+          return next;
+        });
+        showToast(e instanceof Error ? e.message : "Feedback failed", false);
+      }
+    },
+    [result],
+  );
 
   if (!result) {
     return (
@@ -32,13 +73,14 @@ export default function ResultsPage() {
     );
   }
 
-  const { edl, highlights, dead_zones, duration, filename, preset_name } = result;
+  const { edl, highlights, dead_zones, duration, filename, preset_name, threshold_adjustments } = result;
   const { summary } = edl;
+  const hasAdjustments = threshold_adjustments && Object.keys(threshold_adjustments).length > 0;
 
   const handleExport = (format: "json" | "csv" | "edl") => {
     let content = "";
     let mime = "text/plain";
-    let ext = format;
+    const ext = format;
 
     if (format === "json") {
       content = JSON.stringify(result.edl, null, 2);
@@ -46,19 +88,11 @@ export default function ResultsPage() {
     } else if (format === "csv") {
       const rows = [
         ["index", "start", "end", "duration", "type", "score"],
-        ...edl.segments.map((s, i) => [
-          i + 1,
-          s.start,
-          s.end,
-          s.duration,
-          s.type,
-          s.score ?? "",
-        ]),
+        ...edl.segments.map((s, i) => [i + 1, s.start, s.end, s.duration, s.type, s.score ?? ""]),
       ];
       content = rows.map((r) => r.join(",")).join("\n");
       mime = "text/csv";
     } else if (format === "edl") {
-      // Use server-exported EDL if available
       const exports = (result as unknown as { exports?: { edl?: string } }).exports;
       content = exports?.edl ?? "EDL export not available. Re-analyze with export_format=all.";
     }
@@ -74,6 +108,16 @@ export default function ResultsPage() {
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-10">
+      {/* Toast */}
+      {toast && (
+        <div
+          className={`fixed bottom-6 left-1/2 -translate-x-1/2 px-5 py-2.5 rounded-full text-sm font-medium shadow-xl transition-all z-50
+            ${toast.ok ? "bg-green-600 text-white" : "bg-red-600 text-white"}`}
+        >
+          {toast.msg}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-start justify-between mb-6">
         <div>
@@ -94,32 +138,26 @@ export default function ResultsPage() {
         </button>
       </div>
 
+      {/* Threshold adjustment banner */}
+      {hasAdjustments && (
+        <div className="mb-6 p-4 rounded-xl border border-indigo-500/30 bg-indigo-500/5 text-sm">
+          <p className="font-semibold text-indigo-300 mb-2">
+            Thresholds adjusted from past feedback
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-1 text-xs text-white/50">
+            {Object.entries(threshold_adjustments!).map(([key, adj]) => (
+              <AdjustmentBadge key={key} name={key} adj={adj} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Summary stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
-        <StatCard
-          label="Cut savings"
-          value={`${summary.cut_savings_pct}%`}
-          sub={`${summary.dead_zone_count} dead zones`}
-          color="text-red-400"
-        />
-        <StatCard
-          label="Highlights"
-          value={`${summary.highlight_pct}%`}
-          sub={`${summary.highlight_count} moments`}
-          color="text-green-400"
-        />
-        <StatCard
-          label="Dead time"
-          value={`${summary.dead_zone_duration.toFixed(0)}s`}
-          sub="can be cut"
-          color="text-red-300"
-        />
-        <StatCard
-          label="Keep time"
-          value={`${summary.keep_duration.toFixed(0)}s`}
-          sub="neutral content"
-          color="text-yellow-400"
-        />
+        <StatCard label="Cut savings" value={`${summary.cut_savings_pct}%`} sub={`${summary.dead_zone_count} dead zones`} color="text-red-400" />
+        <StatCard label="Highlights" value={`${summary.highlight_pct}%`} sub={`${summary.highlight_count} moments`} color="text-green-400" />
+        <StatCard label="Dead time" value={`${summary.dead_zone_duration.toFixed(0)}s`} sub="can be cut" color="text-red-300" />
+        <StatCard label="Keep time" value={`${summary.keep_duration.toFixed(0)}s`} sub="neutral content" color="text-yellow-400" />
       </div>
 
       {/* Timeline */}
@@ -129,6 +167,11 @@ export default function ResultsPage() {
         </h2>
         <Timeline segments={edl.segments} totalDuration={duration} />
       </div>
+
+      {/* Feedback hint */}
+      <p className="text-xs text-white/30 mb-3 pl-1">
+        Use thumbs up / down on segments to teach GameCut — corrections improve future analyses for the <span className="text-indigo-400">{preset_name}</span> preset.
+      </p>
 
       {/* Tabs */}
       <div className="flex gap-1 mb-4 bg-white/5 rounded-lg p-1 w-fit">
@@ -152,25 +195,58 @@ export default function ResultsPage() {
       <div className="space-y-2 mb-8">
         {activeTab === "timeline" &&
           edl.segments.map((seg, i) => (
-            <SegmentRow key={i} index={i + 1} type={seg.type} start={seg.start} end={seg.end} duration={seg.duration} score={seg.score} />
+            <SegmentRow
+              key={i} index={i + 1}
+              type={seg.type} start={seg.start} end={seg.end}
+              duration={seg.duration} score={seg.score}
+              currentVote={votes.get(`${seg.type}-${seg.start}-${seg.end}`) ?? null}
+              onVote={(vote) =>
+                seg.type !== "keep" &&
+                handleVote(
+                  `${seg.type}-${seg.start}-${seg.end}`,
+                  vote, seg.type as "dead_zone" | "highlight",
+                  seg.score, seg.duration,
+                )
+              }
+            />
           ))}
 
         {activeTab === "highlights" &&
           highlights.map((hl, i) => (
-            <HighlightRow key={i} hl={hl} index={i + 1} />
+            <HighlightRow
+              key={i} hl={hl} index={i + 1}
+              currentVote={votes.get(`highlight-${hl.start}-${hl.end}`) ?? null}
+              onVote={(vote) =>
+                handleVote(
+                  `highlight-${hl.start}-${hl.end}`,
+                  vote, "highlight",
+                  hl.composite_score, hl.duration,
+                )
+              }
+            />
           ))}
 
         {activeTab === "cuts" &&
           dead_zones.map((dz, i) => (
-            <SegmentRow key={i} index={i + 1} type="dead_zone" start={dz.start} end={dz.end} duration={dz.duration} score={dz.confidence} />
+            <SegmentRow
+              key={i} index={i + 1}
+              type="dead_zone" start={dz.start} end={dz.end}
+              duration={dz.duration} score={dz.confidence}
+              currentVote={votes.get(`dead_zone-${dz.start}-${dz.end}`) ?? null}
+              onVote={(vote) =>
+                handleVote(
+                  `dead_zone-${dz.start}-${dz.end}`,
+                  vote, "dead_zone",
+                  dz.confidence, dz.duration,
+                )
+              }
+            />
           ))}
       </div>
 
-      {/* Export buttons */}
+      {/* Export */}
       <div className="border-t border-white/10 pt-6">
-        <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">
-          Export
-        </h2>
+        <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">Export</h2>
         <div className="flex flex-wrap gap-3">
           <ExportButton onClick={() => handleExport("json")} label="EDL (JSON)" icon="📄" />
           <ExportButton onClick={() => handleExport("csv")} label="CSV" icon="📊" />
@@ -181,17 +257,21 @@ export default function ResultsPage() {
   );
 }
 
-function StatCard({
-  label,
-  value,
-  sub,
-  color,
-}: {
-  label: string;
-  value: string;
-  sub: string;
-  color: string;
-}) {
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function AdjustmentBadge({ name, adj }: { name: string; adj: ThresholdAdjustment }) {
+  const positive = adj.delta > 0;
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`text-xs font-mono ${positive ? "text-orange-400" : "text-sky-400"}`}>
+        {positive ? "+" : ""}{adj.delta.toFixed(2)}
+      </span>
+      <span className="text-white/40">{name.replace(/_/g, " ")}</span>
+    </div>
+  );
+}
+
+function StatCard({ label, value, sub, color }: { label: string; value: string; sub: string; color: string }) {
   return (
     <div className="bg-white/5 rounded-lg p-4">
       <p className="text-xs text-white/40 mb-1">{label}</p>
@@ -206,15 +286,49 @@ const SEG_COLORS: Record<string, string> = {
   highlight: "border-green-500/40 text-green-400",
   keep: "border-yellow-500/40 text-yellow-400",
 };
-
 const SEG_LABELS: Record<string, string> = {
   dead_zone: "CUT",
   highlight: "HIGHLIGHT",
   keep: "KEEP",
 };
 
+function FeedbackButtons({
+  currentVote,
+  onVote,
+}: {
+  currentVote: FeedbackVote | null;
+  onVote: (v: FeedbackVote) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 ml-2">
+      <button
+        title="Good detection"
+        onClick={(e) => { e.stopPropagation(); onVote("up"); }}
+        className={`w-6 h-6 rounded flex items-center justify-center text-xs transition-all
+          ${currentVote === "up"
+            ? "bg-green-500/30 text-green-400"
+            : "text-white/20 hover:text-green-400 hover:bg-green-500/10"
+          }`}
+      >
+        ▲
+      </button>
+      <button
+        title="Wrong detection"
+        onClick={(e) => { e.stopPropagation(); onVote("down"); }}
+        className={`w-6 h-6 rounded flex items-center justify-center text-xs transition-all
+          ${currentVote === "down"
+            ? "bg-red-500/30 text-red-400"
+            : "text-white/20 hover:text-red-400 hover:bg-red-500/10"
+          }`}
+      >
+        ▼
+      </button>
+    </div>
+  );
+}
+
 function SegmentRow({
-  index, type, start, end, duration, score
+  index, type, start, end, duration, score, currentVote, onVote,
 }: {
   index: number;
   type: string;
@@ -222,7 +336,10 @@ function SegmentRow({
   end: number;
   duration: number;
   score: number | null;
+  currentVote: FeedbackVote | null;
+  onVote: (v: FeedbackVote) => void;
 }) {
+  const showFeedback = type !== "keep";
   return (
     <div className={`flex items-center gap-3 p-3 rounded-lg border bg-white/[0.02] text-sm ${SEG_COLORS[type] || "border-white/10 text-white/60"}`}>
       <span className="text-white/20 w-6 text-right text-xs">{index}</span>
@@ -234,18 +351,28 @@ function SegmentRow({
       {score !== null && (
         <span className="text-xs font-mono w-10 text-right">{(score * 100).toFixed(0)}%</span>
       )}
+      {showFeedback && (
+        <FeedbackButtons currentVote={currentVote} onVote={onVote} />
+      )}
     </div>
   );
 }
 
-function HighlightRow({ hl, index }: { hl: import("@/lib/types").Highlight; index: number }) {
+function HighlightRow({
+  hl, index, currentVote, onVote,
+}: {
+  hl: Highlight;
+  index: number;
+  currentVote: FeedbackVote | null;
+  onVote: (v: FeedbackVote) => void;
+}) {
   const [open, setOpen] = useState(false);
   return (
-    <div
-      className="border border-green-500/30 bg-green-500/5 rounded-lg overflow-hidden cursor-pointer"
-      onClick={() => setOpen((v) => !v)}
-    >
-      <div className="flex items-center gap-3 p-3 text-sm">
+    <div className="border border-green-500/30 bg-green-500/5 rounded-lg overflow-hidden">
+      <div
+        className="flex items-center gap-3 p-3 text-sm cursor-pointer"
+        onClick={() => setOpen((v) => !v)}
+      >
         <span className="text-white/20 w-6 text-right text-xs">{index}</span>
         <span className="font-semibold text-xs w-16 text-green-400">HIGHLIGHT</span>
         <span className="font-mono text-white/70">{formatTime(hl.start)}</span>
@@ -254,6 +381,7 @@ function HighlightRow({ hl, index }: { hl: import("@/lib/types").Highlight; inde
         <span className="ml-auto font-bold text-green-400">
           {(hl.composite_score * 100).toFixed(0)}%
         </span>
+        <FeedbackButtons currentVote={currentVote} onVote={onVote} />
         <span className="text-white/20 text-xs">{open ? "▲" : "▼"}</span>
       </div>
       {open && (
@@ -275,22 +403,13 @@ function ScoreBar({ label, value, color }: { label: string; value: number; color
         <span style={{ color }}>{(value * 100).toFixed(0)}%</span>
       </div>
       <div className="bg-white/10 rounded-full h-1">
-        <div
-          className="h-1 rounded-full"
-          style={{ width: `${value * 100}%`, backgroundColor: color }}
-        />
+        <div className="h-1 rounded-full" style={{ width: `${value * 100}%`, backgroundColor: color }} />
       </div>
     </div>
   );
 }
 
-function ExportButton({
-  onClick, label, icon
-}: {
-  onClick: () => void;
-  label: string;
-  icon: string;
-}) {
+function ExportButton({ onClick, label, icon }: { onClick: () => void; label: string; icon: string }) {
   return (
     <button
       onClick={onClick}

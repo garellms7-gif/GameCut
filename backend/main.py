@@ -18,6 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from modules.audio_splitter import split_audio, VOCALS_LOWCUT_HZ, VOCALS_HIGHCUT_HZ
+from modules.corrections import (
+    apply_corrections,
+    correction_summary,
+    save_correction,
+    segment_hash,
+)
 from modules.dead_zone import detect_dead_zones
 from modules.hype_moment import detect_hype_moments
 from modules.edl_export import build_edl, to_json, to_csv, to_edl
@@ -122,6 +128,9 @@ async def analyze(
     dead_zone_sensitivity = max(0.25, min(4.0, dead_zone_sensitivity))
     hype_sensitivity = max(0.25, min(4.0, hype_sensitivity))
 
+    # Apply any accumulated user corrections to the preset thresholds
+    preset, threshold_adjustments = apply_corrections(game_preset, preset)
+
     # Save upload to temp file
     suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
     tmp_path = None
@@ -197,6 +206,17 @@ async def analyze(
             source_name=Path(file.filename or "CLIP").stem[:8].upper(),
         )
 
+        # Attach segment_hash to each detected segment so the frontend can
+        # send it back as part of a /feedback call.
+        for dz in dead_zones:
+            dz["segment_hash"] = segment_hash(
+                game_preset, "dead_zone", dz.get("confidence"), dz["duration"]
+            )
+        for hl in highlights:
+            hl["segment_hash"] = segment_hash(
+                game_preset, "highlight", hl.get("composite_score"), hl["duration"]
+            )
+
         response_data = {
             "preset": game_preset,
             "preset_name": preset["name"],
@@ -204,6 +224,7 @@ async def analyze(
             "duration": duration,
             "fps": fps,
             "audio_tracks": audio_track_meta,
+            "threshold_adjustments": threshold_adjustments,
             "dead_zones": dead_zones,
             "highlights": highlights,
             "edl": edl,
@@ -231,6 +252,98 @@ async def analyze(
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+@app.post("/feedback")
+async def submit_feedback(
+    preset: str = Form(..., description="Game preset key"),
+    segment_type: str = Form(..., description="'dead_zone' or 'highlight'"),
+    vote: str = Form(..., description="'up' or 'down'"),
+    score: float = Form(None, description="Detection score (0–1); used for bucketing"),
+    duration: float = Form(..., description="Segment duration in seconds"),
+):
+    """
+    Record a thumbs-up or thumbs-down vote on a detected segment.
+
+    Votes are aggregated by segment class (preset × type × score bucket ×
+    duration bucket) and persisted to corrections.json.  Future /analyze calls
+    for the same preset will have their thresholds adjusted accordingly.
+    """
+    if preset not in PRESETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown preset '{preset}'. Valid: {list(PRESETS.keys())}",
+        )
+    if segment_type not in ("dead_zone", "highlight"):
+        raise HTTPException(
+            status_code=400,
+            detail="segment_type must be 'dead_zone' or 'highlight'",
+        )
+    if vote not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="vote must be 'up' or 'down'")
+    if duration <= 0:
+        raise HTTPException(status_code=400, detail="duration must be > 0")
+
+    try:
+        entry = save_correction(
+            preset=preset,
+            segment_type=segment_type,
+            vote=vote,
+            score=score,
+            duration=duration,
+        )
+    except Exception as e:
+        logger.exception("Failed to save correction")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return JSONResponse(
+        content={
+            "saved": True,
+            "correction": entry,
+            "message": (
+                f"Vote recorded. "
+                f"{entry['votes_up']} up / {entry['votes_down']} down "
+                f"for this segment class."
+            ),
+        }
+    )
+
+
+@app.get("/corrections/{preset_key}")
+def get_corrections(preset_key: str):
+    """Return a summary of all stored corrections for a preset."""
+    if preset_key not in PRESETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown preset '{preset_key}'. Valid: {list(PRESETS.keys())}",
+        )
+    return correction_summary(preset_key)
+
+
+@app.delete("/corrections/{preset_key}")
+def clear_corrections(preset_key: str):
+    """Delete all stored corrections for a preset (reset thresholds to defaults)."""
+    from modules.corrections import load_corrections, CORRECTIONS_PATH
+    import json
+
+    if preset_key not in PRESETS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown preset '{preset_key}'.",
+        )
+
+    corrections = load_corrections()
+    before = len(corrections)
+    corrections = {h: e for h, e in corrections.items() if e.get("preset") != preset_key}
+    removed = before - len(corrections)
+
+    try:
+        with open(CORRECTIONS_PATH, "w") as f:
+            json.dump(corrections, f, indent=2)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"preset": preset_key, "removed": removed, "remaining": len(corrections)}
 
 
 @app.post("/analyze/export/{format}")
