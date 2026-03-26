@@ -1,0 +1,57 @@
+{
+  "fps": {
+    "name": "First-Person Shooter",
+    "silence_threshold_db": -35,
+    "static_frame_threshold": 0.02,
+    "min_dead_zone_duration": 1.5,
+    "hype_volume_spike_db": 15,
+    "hype_pitch_rise_hz": 80,
+    "speech_rate_multiplier": 1.4,
+    "min_hype_duration": 2.0,
+    "description": "Optimized for fast-paced action; lower silence threshold catches brief pauses"
+  },
+  "open_world": {
+    "name": "Open World",
+    "silence_threshold_db": -45,
+    "static_frame_threshold": 0.015,
+    "min_dead_zone_duration": 4.0,
+    "hype_volume_spike_db": 12,
+    "hype_pitch_rise_hz": 60,
+    "speech_rate_multiplier": 1.3,
+    "min_hype_duration": 3.0,
+    "description": "Allows longer quiet exploration phases before flagging as dead zone"
+  },
+  "rpg": {
+    "name": "RPG / Story Game",
+    "silence_threshold_db": -50,
+    "static_frame_threshold": 0.01,
+    "min_dead_zone_duration": 6.0,
+    "hype_volume_spike_db": 10,
+    "hype_pitch_rise_hz": 50,
+    "speech_rate_multiplier": 1.25,
+    "min_hype_duration": 4.0,
+    "description": "High tolerance for quiet narrative moments; only cuts truly dead content"
+  },
+  "fighting": {
+    "name": "Fighting Game",
+    "silence_threshold_db": -30,
+    "static_frame_threshold": 0.025,
+    "min_dead_zone_duration": 1.0,
+    "hype_volume_spike_db": 18,
+    "hype_pitch_rise_hz": 100,
+    "speech_rate_multiplier": 1.5,
+    "min_hype_duration": 1.5,
+    "description": "Aggressive cutting; short silence and loud reactions define hype"
+  },
+  "platformer": {
+    "name": "Platformer",
+    "silence_threshold_db": -40,
+    "static_frame_threshold": 0.018,
+    "min_dead_zone_duration": 3.0,
+    "hype_volume_spike_db": 13,
+    "hype_pitch_rise_hz": 70,
+    "speech_rate_multiplier": 1.35,
+    "min_hype_duration": 2.5,
+    "description": "Balanced preset for platformers with moderate action and exploration"
+  }
+}
