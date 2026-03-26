@@ -105,12 +105,16 @@ function syntheticPeaks(segs: Segment[], n: number, dur: number): Float32Array {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
+export type ConfirmationState = "confirmed_cut" | "confirmed_highlight";
+
 interface TimelineProps {
   segments: Segment[];
   totalDuration: number;
   struggleZones?: StruggleZone[];
   videoFile?: File | null;
   onSegmentSelect?: (seg: Segment | null) => void;
+  /** Key → confirmation state, keyed as "type:start:end" */
+  confirmations?: ReadonlyMap<string, ConfirmationState>;
 }
 
 export function Timeline({
@@ -119,6 +123,7 @@ export function Timeline({
   struggleZones = [],
   videoFile,
   onSegmentSelect,
+  confirmations,
 }: TimelineProps) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const scrollRef    = useRef<HTMLDivElement>(null);
@@ -211,23 +216,40 @@ export function Timeline({
     // Effective peaks: real audio if decoded, else synthetic
     const p = peaks ?? syntheticPeaks(segments, canvasW, totalDuration);
 
+    // Helper: resolve confirmation state for a segment
+    const conf = (seg: Segment | null): ConfirmationState | undefined =>
+      seg ? confirmations?.get(`${seg.type}:${seg.start}:${seg.end}`) : undefined;
+
     // ── 1 · Draw waveform bars ──────────────────────────────────────────
     for (let i = 0; i < canvasW; i++) {
-      const t   = (i / canvasW) * totalDuration;
-      const seg = segAt(t, segments);
-      const amp = p[i] ?? 0;
-      const barH = Math.max(1, amp * CANVAS_H * 0.88);
+      const t    = (i / canvasW) * totalDuration;
+      const seg  = segAt(t, segments);
+      const c    = conf(seg);
+      const amp  = p[i] ?? 0;
 
-      ctx.fillStyle = BAR_COLOR[seg?.type ?? "keep"] ?? BAR_COLOR.keep;
+      let barH = Math.max(1, amp * CANVAS_H * 0.88);
+      let barColor: string;
 
-      // Highlight: add green glow
-      if (seg?.type === "highlight") {
+      if (c === "confirmed_cut") {
+        // Confirmed cut: nearly invisible — the audio is definitely gone
+        barColor = "rgba(255,255,255,0.07)";
+        barH *= 0.25;
+        ctx.shadowBlur = 0;
+      } else if (c === "confirmed_highlight") {
+        // Confirmed highlight: vivid and bright
+        barColor = "rgba(60,255,100,1.0)";
+        ctx.shadowColor = "#00ff55";
+        ctx.shadowBlur  = 10;
+      } else if (seg?.type === "highlight") {
+        barColor = BAR_COLOR.highlight;
         ctx.shadowColor = "#22c55e";
         ctx.shadowBlur  = 6;
       } else {
+        barColor = BAR_COLOR[seg?.type ?? "keep"] ?? BAR_COLOR.keep;
         ctx.shadowBlur = 0;
       }
 
+      ctx.fillStyle = barColor;
       ctx.fillRect(i, midY - barH / 2, 1, barH);
     }
     ctx.shadowBlur = 0;
@@ -236,21 +258,51 @@ export function Timeline({
     for (const seg of segments) {
       const x = (seg.start / totalDuration) * canvasW;
       const w = (seg.duration / totalDuration) * canvasW;
-      const c = OVERLAY[seg.type];
-      if (c) {
-        ctx.fillStyle = c;
+      const c = conf(seg);
+
+      let overlayColor: string | null = null;
+      if (c === "confirmed_cut") {
+        overlayColor = "rgba(80,80,80,0.45)";    // gray — confirmed gone
+      } else if (c === "confirmed_highlight") {
+        overlayColor = "rgba(34,197,94,0.32)";   // strong green — locked in
+      } else {
+        overlayColor = OVERLAY[seg.type] ?? null;
+      }
+
+      if (overlayColor) {
+        ctx.fillStyle = overlayColor;
         ctx.fillRect(x, 0, Math.max(w, 1), CANVAS_H);
       }
     }
 
-    // ── 3 · Highlight glow border ────────────────────────────────────────
+    // ── 3 · Highlight glow border (confirmed = solid, unconfirmed = dashed) ──
     for (const seg of segments) {
       if (seg.type !== "highlight") continue;
       const x = (seg.start / totalDuration) * canvasW;
       const w = (seg.duration / totalDuration) * canvasW;
-      ctx.strokeStyle = "rgba(34,197,94,0.55)";
-      ctx.lineWidth   = 1;
+      const c = conf(seg);
+
+      if (c === "confirmed_highlight") {
+        ctx.strokeStyle = "rgba(34,197,94,0.90)";
+        ctx.lineWidth   = 2;
+      } else {
+        ctx.strokeStyle = "rgba(34,197,94,0.55)";
+        ctx.lineWidth   = 1;
+      }
       ctx.strokeRect(x + 0.5, 0.5, Math.max(w - 1, 1), CANVAS_H - 1);
+    }
+
+    // ── 3b · Confirmed-cut strikethrough line ────────────────────────────
+    for (const seg of segments) {
+      if (conf(seg) !== "confirmed_cut") continue;
+      const x = (seg.start / totalDuration) * canvasW;
+      const w = (seg.duration / totalDuration) * canvasW;
+      ctx.strokeStyle = "rgba(180,50,50,0.35)";
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, midY);
+      ctx.lineTo(x + Math.max(w, 1), midY);
+      ctx.stroke();
     }
 
     // ── 4 · Struggle zone strip (top 5 px) ───────────────────────────────
@@ -284,7 +336,7 @@ export function Timeline({
         ctx.fillText(_shortTime(t), x + 3, CANVAS_H - 4);
       }
     }
-  }, [peaks, segments, struggleZones, totalDuration, canvasW]);
+  }, [peaks, segments, struggleZones, totalDuration, canvasW, confirmations]);
 
   // ── Click on canvas ───────────────────────────────────────────────────────
   const handleClick = useCallback(

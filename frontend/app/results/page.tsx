@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Timeline } from "@/components/Timeline";
+import type { ConfirmationState } from "@/components/Timeline";
 import { assembleHighlights, formatTime, submitFeedback } from "@/lib/api";
 import { getUploadedFile } from "@/lib/fileStore";
 import type {
@@ -30,6 +31,8 @@ export default function ResultsPage() {
   const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null);
   // Per-segment approve / reject actions (key → action)
   const [segmentActions, setSegmentActions] = useState<Map<string, "approved" | "rejected">>(new Map());
+  // Bulk confirmation state — tracks confirmed_cut / confirmed_highlight per segment
+  const [confirmations, setConfirmations] = useState<Map<string, ConfirmationState>>(new Map());
 
   useEffect(() => {
     const file = getUploadedFile();
@@ -110,6 +113,33 @@ export default function ResultsPage() {
   }
 
   const { edl, highlights, dead_zones, struggle_zones, duration, filename, preset_name, threshold_adjustments } = result;
+
+  // ── Bulk confirmation handlers (need edl, defined after guard) ────────────
+  const handleAcceptAllCuts = () =>
+    setConfirmations((prev) => {
+      const next = new Map(prev);
+      for (const seg of edl.segments)
+        if (seg.type === "dead_zone") next.set(segKey(seg), "confirmed_cut");
+      return next;
+    });
+
+  const handleAcceptAllHighlights = () =>
+    setConfirmations((prev) => {
+      const next = new Map(prev);
+      for (const seg of edl.segments)
+        if (seg.type === "highlight") next.set(segKey(seg), "confirmed_highlight");
+      return next;
+    });
+
+  const handleResetAll = () => setConfirmations(new Map());
+
+  // Counts for button labels
+  const totalCuts       = edl.segments.filter(s => s.type === "dead_zone").length;
+  const confirmedCuts   = edl.segments.filter(s => s.type === "dead_zone" && confirmations.has(segKey(s))).length;
+  const totalHL         = edl.segments.filter(s => s.type === "highlight").length;
+  const confirmedHL     = edl.segments.filter(s => s.type === "highlight" && confirmations.has(segKey(s))).length;
+  const allCutsAccepted = confirmedCuts === totalCuts && totalCuts > 0;
+  const allHLAccepted   = confirmedHL   === totalHL   && totalHL   > 0;
   const { summary } = edl;
   const hasAdjustments = threshold_adjustments && Object.keys(threshold_adjustments).length > 0;
   const hasStruggleZones = (struggle_zones ?? []).length > 0;
@@ -122,18 +152,37 @@ export default function ResultsPage() {
     }).exports;
 
     if (format === "json") {
-      // Apply any approve/reject overrides to the EDL before export
+      // Build an annotated EDL that reflects all user decisions.
+      // Priority: per-segment action (VideoPreview) > bulk confirmation > AI suggestion
       const editedEdl = {
         ...result.edl,
         segments: result.edl.segments.map((s) => {
-          const k = segKey(s);
+          const k      = segKey(s);
           const action = segmentActions.get(k);
-          if (!action) return s;
-          return {
-            ...s,
-            type: action === "approved" ? "keep" : "dead_zone",
-            action,
-          };
+          const conf   = confirmations.get(k);
+
+          // Individual approve / reject always wins
+          if (action) {
+            return {
+              ...s,
+              type:       action === "approved" ? "keep" : "dead_zone",
+              confirmed:  true,
+              edl_action: action === "approved" ? "keep" : "hard_cut",
+            };
+          }
+          // Bulk confirmation
+          if (conf) {
+            return {
+              ...s,
+              confirmed:  true,
+              edl_action: conf === "confirmed_cut" ? "hard_cut" : "keep",
+            };
+          }
+          // Unconfirmed AI suggestion
+          const suggestedAction =
+            s.type === "dead_zone" ? "suggestion_cut" :
+            s.type === "highlight" ? "suggestion_keep" : "keep";
+          return { ...s, confirmed: false, edl_action: suggestedAction };
         }),
       };
       content = JSON.stringify(editedEdl, null, 2);
@@ -262,15 +311,54 @@ export default function ResultsPage() {
 
       {/* Timeline */}
       <div className="bg-white/5 rounded-xl p-5 mb-6">
-        <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">
-          Visual Timeline
-        </h2>
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider">
+            Visual Timeline
+          </h2>
+
+          {/* Bulk confirmation buttons */}
+          <div className="flex flex-wrap items-center gap-2">
+            <BulkActionButton
+              onClick={handleAcceptAllCuts}
+              disabled={totalCuts === 0}
+              confirmed={allCutsAccepted}
+              confirmedCount={confirmedCuts}
+              totalCount={totalCuts}
+              label="Accept All Cuts"
+              confirmedLabel="Cuts Accepted"
+              colorClass="border-red-500/40 text-red-300 hover:bg-red-500/15 data-[confirmed=true]:bg-red-500/20 data-[confirmed=true]:border-red-500/60"
+              icon="✕"
+            />
+            <BulkActionButton
+              onClick={handleAcceptAllHighlights}
+              disabled={totalHL === 0}
+              confirmed={allHLAccepted}
+              confirmedCount={confirmedHL}
+              totalCount={totalHL}
+              label="Accept All Highlights"
+              confirmedLabel="Highlights Locked"
+              colorClass="border-green-500/40 text-green-300 hover:bg-green-500/15 data-[confirmed=true]:bg-green-500/20 data-[confirmed=true]:border-green-500/60"
+              icon="✓"
+            />
+            {confirmations.size > 0 && (
+              <button
+                onClick={handleResetAll}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border
+                  border-white/15 text-white/40 hover:bg-white/10 hover:text-white/60 transition-all"
+              >
+                ↺ Reset All
+              </button>
+            )}
+          </div>
+        </div>
+
         <Timeline
           segments={edl.segments}
           totalDuration={duration}
           struggleZones={struggle_zones ?? []}
           videoFile={getUploadedFile()}
           onSegmentSelect={setPreviewSegment}
+          confirmations={confirmations}
         />
       </div>
 
@@ -326,6 +414,7 @@ export default function ResultsPage() {
               duration={seg.duration} score={seg.score}
               currentVote={votes.get(`${seg.type}-${seg.start}-${seg.end}`) ?? null}
               action={segmentActions.get(segKey(seg)) ?? null}
+              confirmation={confirmations.get(segKey(seg)) ?? null}
               onVote={(vote) =>
                 seg.type !== "keep" &&
                 handleVote(
@@ -496,7 +585,7 @@ function FeedbackButtons({
 
 function SegmentRow({
   index, type, start, end, duration, score,
-  currentVote, action, onVote, onPreview,
+  currentVote, action, confirmation, onVote, onPreview,
 }: {
   index: number;
   type: string;
@@ -506,18 +595,35 @@ function SegmentRow({
   score: number | null;
   currentVote: FeedbackVote | null;
   action: "approved" | "rejected" | null;
+  confirmation: ConfirmationState | null;
   onVote: (v: FeedbackVote) => void;
   onPreview?: () => void;
 }) {
   const showFeedback = type !== "keep";
+
+  // Confirmed state overrides visual style
+  const isConfirmedCut = confirmation === "confirmed_cut";
+  const isConfirmedHL  = confirmation === "confirmed_highlight";
+
+  const rowStyle =
+    isConfirmedCut ? "border-white/10 bg-white/[0.01] opacity-50" :
+    isConfirmedHL  ? "border-green-500/50 bg-green-500/10 ring-1 ring-green-500/20" :
+    SEG_COLORS[type] || "border-white/10 text-white/60";
+
   const actionBadge =
-    action === "approved" ? "bg-green-500/20 text-green-400" :
-    action === "rejected" ? "bg-red-500/20 text-red-400" : null;
+    action === "approved"          ? "bg-green-500/20 text-green-400"  :
+    action === "rejected"          ? "bg-red-500/20 text-red-400"      : null;
+
+  const confirmBadge =
+    isConfirmedCut ? "bg-neutral-700/60 text-neutral-400"   :
+    isConfirmedHL  ? "bg-green-500/25 text-green-300"        : null;
 
   return (
-    <div className={`flex items-center gap-3 p-3 rounded-lg border bg-white/[0.02] text-sm ${SEG_COLORS[type] || "border-white/10 text-white/60"}`}>
+    <div className={`flex items-center gap-3 p-3 rounded-lg border text-sm transition-all ${rowStyle}`}>
       <span className="text-white/20 w-6 text-right text-xs">{index}</span>
-      <span className="font-semibold text-xs w-16">{SEG_LABELS[type] || type}</span>
+      <span className={`font-semibold text-xs w-16 ${isConfirmedCut ? "line-through text-white/25" : ""}`}>
+        {SEG_LABELS[type] || type}
+      </span>
       <span className="font-mono text-white/70">{formatTime(start)}</span>
       <span className="text-white/20">→</span>
       <span className="font-mono text-white/70">{formatTime(end)}</span>
@@ -525,6 +631,13 @@ function SegmentRow({
       {score !== null && (
         <span className="text-xs font-mono w-10 text-right">{(score * 100).toFixed(0)}%</span>
       )}
+      {/* Bulk confirmation badge */}
+      {confirmBadge && (
+        <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${confirmBadge}`}>
+          {isConfirmedCut ? "✕ confirmed cut" : "✓ confirmed"}
+        </span>
+      )}
+      {/* Individual action badge (takes priority, shows on top if both set) */}
       {actionBadge && (
         <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${actionBadge}`}>
           {action === "approved" ? "✓ keep" : "✕ cut"}
@@ -739,6 +852,38 @@ function VideoPreview({
         </p>
       )}
     </div>
+  );
+}
+
+function BulkActionButton({
+  onClick, disabled, confirmed, confirmedCount, totalCount,
+  label, confirmedLabel, colorClass, icon,
+}: {
+  onClick: () => void;
+  disabled: boolean;
+  confirmed: boolean;
+  confirmedCount: number;
+  totalCount: number;
+  label: string;
+  confirmedLabel: string;
+  colorClass: string;
+  icon: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      data-confirmed={confirmed}
+      title={confirmed ? `${confirmedCount} / ${totalCount} confirmed` : label}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border
+        transition-all disabled:opacity-30 disabled:cursor-not-allowed ${colorClass}`}
+    >
+      <span>{confirmed ? "✓" : icon}</span>
+      <span>{confirmed ? confirmedLabel : label}</span>
+      <span className="opacity-60 font-normal">
+        ({confirmedCount}/{totalCount})
+      </span>
+    </button>
   );
 }
 
