@@ -2,6 +2,8 @@
 
 Auto-detect **dead zones** (boring, cut-worthy content) and **hype moments** (highlight-worthy clips) in gameplay footage. Exports a merged Edit Decision List (EDL) in JSON, CSV, and DaVinci Resolve-compatible `.edl` format.
 
+Run as a **web app** (Next.js + FastAPI) or as a **fully-local desktop app** (Tauri `.msi` / `.dmg` — no server required).
+
 ---
 
 ## Architecture
@@ -51,6 +53,99 @@ sudo apt install ffmpeg
 # Windows (via Chocolatey)
 choco install ffmpeg
 ```
+
+---
+
+## Desktop App (Tauri)
+
+GameCut can be packaged as a native desktop application that ships the Python
+backend as a sidecar binary — no Python installation required on the end-user
+machine.
+
+### Additional Prerequisites
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Rust | 1.77+ | Tauri core |
+| Cargo | bundled with Rust | Tauri build |
+| Node.js | 18+ | Frontend build |
+| PyInstaller | 6+ | Backend binary |
+| ffmpeg | any recent | Runtime (must be on PATH) |
+
+Install Rust: https://rustup.rs
+
+### 1. Generate app icons
+
+```bash
+./scripts/generate-icons.sh
+# Optionally pass your own 1024×1024 PNG:
+# ./scripts/generate-icons.sh path/to/icon.png
+```
+
+Replace `frontend/src-tauri/icons/` with real brand artwork before shipping.
+
+### 2. Build the Python backend sidecar
+
+```bash
+# Make sure you are inside the backend virtual environment
+cd backend
+pip install -r requirements.txt
+pip install pyinstaller>=6.0.0
+
+cd ..
+./scripts/build-sidecar.sh
+```
+
+This compiles `backend/main.py` with PyInstaller and copies the output to
+`frontend/src-tauri/binaries/gamecut-backend-<target-triple>`.
+
+> **ffmpeg** is NOT bundled — it must be present on the end-user's PATH.
+> For a fully self-contained installer, consider adding an ffmpeg static
+> binary to `src-tauri/binaries/` and adjusting `tauri.conf.json`
+> `externalBin` accordingly.
+
+### 3. Build the installer
+
+```bash
+cd frontend
+npm install
+npm run tauri:build
+```
+
+Tauri runs `npm run build:tauri` (which sets `TAURI_BUILD=1` and generates a
+static Next.js export), then compiles the Rust shell, and finally bundles
+everything.
+
+Output artifacts:
+
+| Platform | Installer | Location |
+|----------|-----------|----------|
+| Windows  | `.msi`    | `frontend/src-tauri/target/release/bundle/msi/` |
+| macOS    | `.dmg`    | `frontend/src-tauri/target/release/bundle/dmg/` |
+| macOS    | `.app`    | `frontend/src-tauri/target/release/bundle/macos/` |
+
+### 4. Development mode (hot reload)
+
+In Tauri dev mode the app loads the Next.js dev server and spawns the backend
+sidecar automatically:
+
+```bash
+# Terminal 1 — backend (the sidecar is also spawned by Tauri, but running it
+#              separately gives you cleaner logs during development)
+cd backend && uvicorn main:app --reload --port 8000
+
+# Terminal 2 — Tauri dev
+cd frontend && npm run tauri:dev
+```
+
+> The sidecar binary must exist in `src-tauri/binaries/` even during
+> `tauri dev`.  Run `./scripts/build-sidecar.sh` at least once first.
+
+### File dialog
+
+In the desktop app the drag-and-drop upload area is replaced by the OS-native
+file picker.  The selected file path is passed directly to the backend —
+no upload round-trip for large video files.
 
 ---
 

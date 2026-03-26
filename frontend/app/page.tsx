@@ -3,7 +3,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { analyzeVideo, detectPreset, fetchPresets } from "@/lib/api";
-import { setUploadedFile } from "@/lib/fileStore";
+import { setUploadedFile, setUploadedFilePath } from "@/lib/fileStore";
+import { isTauri, pickVideoFile } from "@/lib/tauri";
 import type { GamePreset, PresetDetectionResult } from "@/lib/types";
 
 const PRESET_LABELS: Record<GamePreset, string> = {
@@ -27,6 +28,8 @@ export default function UploadPage() {
 
   const [dragActive, setDragActive]   = useState(false);
   const [file, setFile]               = useState<File | null>(null);
+  // In Tauri mode we only have a filesystem path, not a File object.
+  const [tauriPath, setTauriPath]     = useState<string | null>(null);
   const [preset, setPreset]           = useState<GamePreset>("fps");
   const [deadSens, setDeadSens]       = useState(1.0);
   const [hypeSens, setHypeSens]       = useState(1.0);
@@ -42,6 +45,13 @@ export default function UploadPage() {
   const [detectError, setDetectError]         = useState<string | null>(null);
   const detectAbortRef                         = useRef<AbortController | null>(null);
 
+  // The "thing" we actually have — a File in the browser, a path string in Tauri.
+  const fileOrPath: File | string | null = tauriPath ?? file;
+  // Display name shown in the drop zone.
+  const displayName: string | null = tauriPath
+    ? tauriPath.replace(/\\/g, "/").split("/").pop() ?? tauriPath
+    : file?.name ?? null;
+
   useEffect(() => {
     fetchPresets()
       .then((data) => {
@@ -52,11 +62,10 @@ export default function UploadPage() {
       .catch(() => {});
   }, []);
 
-  // Trigger auto-detection when a new file arrives and auto mode is on
+  // Trigger auto-detection whenever the source changes and auto mode is on.
   useEffect(() => {
-    if (!file || !autoMode) return;
+    if (!fileOrPath || !autoMode) return;
 
-    // Cancel any in-flight detection for the previous file
     detectAbortRef.current?.abort();
     const abort = new AbortController();
     detectAbortRef.current = abort;
@@ -66,7 +75,7 @@ export default function UploadPage() {
     setDetectError(null);
     setUserOverride(false);
 
-    detectPreset(file)
+    detectPreset(fileOrPath)
       .then((result) => {
         if (abort.signal.aborted) return;
         setDetection(result);
@@ -80,11 +89,23 @@ export default function UploadPage() {
       });
 
     return () => { abort.abort(); };
-  }, [file, autoMode]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, tauriPath, autoMode]);
 
   const handleFileSet = useCallback((f: File) => {
     setFile(f);
+    setTauriPath(null);
     setUploadedFile(f);
+    setError(null);
+  }, []);
+
+  /** Open the OS-native file picker (Tauri desktop only). */
+  const handleTauriPick = useCallback(async () => {
+    const path = await pickVideoFile();
+    if (!path) return;
+    setTauriPath(path);
+    setFile(null);
+    setUploadedFilePath(path);
     setError(null);
   }, []);
 
@@ -113,13 +134,14 @@ export default function UploadPage() {
   };
 
   const handleAnalyze = async () => {
-    if (!file) return;
+    if (!fileOrPath) return;
     setLoading(true);
     setError(null);
 
     const jobId = crypto.randomUUID();
-    sessionStorage.setItem("gc_file_name", file.name);
-    sessionStorage.setItem("gc_file_size", String(file.size));
+    const name = displayName ?? "video.mp4";
+    sessionStorage.setItem("gc_file_name", name);
+    sessionStorage.setItem("gc_file_size", file ? String(file.size) : "0");
     sessionStorage.setItem("gc_preset", preset);
     sessionStorage.setItem("gc_job_id", jobId);
     sessionStorage.setItem("gc_status", "analyzing");
@@ -128,7 +150,7 @@ export default function UploadPage() {
     await new Promise((r) => setTimeout(r, 100));
 
     try {
-      const result = await analyzeVideo(file, preset, deadSens, hypeSens, undefined, jobId);
+      const result = await analyzeVideo(fileOrPath, preset, deadSens, hypeSens, undefined, jobId);
       sessionStorage.setItem("gc_result", JSON.stringify(result));
       sessionStorage.setItem("gc_status", "done");
     } catch (err: unknown) {
@@ -149,34 +171,56 @@ export default function UploadPage() {
         Drop a video to auto-detect dead zones and highlight moments.
       </p>
 
-      {/* Drop zone */}
-      <div
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onClick={() => fileRef.current?.click()}
-        className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all
-          ${dragActive ? "drag-active border-indigo-500 bg-indigo-500/5" : "border-white/20 hover:border-white/40"}
-          ${file ? "border-green-500/60 bg-green-500/5" : ""}`}
-      >
-        <input ref={fileRef} type="file" accept="video/*" className="hidden" onChange={handleFileChange} />
-        {file ? (
-          <div>
-            <div className="text-4xl mb-3">🎬</div>
-            <p className="font-semibold text-green-400">{file.name}</p>
-            <p className="text-sm text-white/40 mt-1">
-              {(file.size / 1024 / 1024).toFixed(1)} MB — click to change
-            </p>
-          </div>
-        ) : (
-          <div>
-            <div className="text-4xl mb-3 text-white/30">📁</div>
-            <p className="text-white/60">Drag & drop a video file here</p>
-            <p className="text-sm text-white/30 mt-1">or click to browse</p>
-            <p className="text-xs text-white/20 mt-3">MP4, MOV, MKV, AVI supported</p>
-          </div>
-        )}
-      </div>
+      {/* Drop zone — Tauri: native dialog button; Browser: drag-and-drop */}
+      {isTauri() ? (
+        <button
+          onClick={handleTauriPick}
+          className={`w-full border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all
+            ${tauriPath ? "border-green-500/60 bg-green-500/5" : "border-white/20 hover:border-white/40"}`}
+        >
+          {tauriPath ? (
+            <div>
+              <div className="text-4xl mb-3">🎬</div>
+              <p className="font-semibold text-green-400">{displayName}</p>
+              <p className="text-sm text-white/40 mt-1">Click to choose a different file</p>
+            </div>
+          ) : (
+            <div>
+              <div className="text-4xl mb-3 text-white/30">📂</div>
+              <p className="text-white/60">Click to browse for a video file</p>
+              <p className="text-xs text-white/20 mt-3">MP4, MOV, MKV, AVI, WebM supported</p>
+            </div>
+          )}
+        </button>
+      ) : (
+        <div
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onClick={() => fileRef.current?.click()}
+          className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all
+            ${dragActive ? "drag-active border-indigo-500 bg-indigo-500/5" : "border-white/20 hover:border-white/40"}
+            ${file ? "border-green-500/60 bg-green-500/5" : ""}`}
+        >
+          <input ref={fileRef} type="file" accept="video/*" className="hidden" onChange={handleFileChange} />
+          {file ? (
+            <div>
+              <div className="text-4xl mb-3">🎬</div>
+              <p className="font-semibold text-green-400">{file.name}</p>
+              <p className="text-sm text-white/40 mt-1">
+                {(file.size / 1024 / 1024).toFixed(1)} MB — click to change
+              </p>
+            </div>
+          ) : (
+            <div>
+              <div className="text-4xl mb-3 text-white/30">📁</div>
+              <p className="text-white/60">Drag & drop a video file here</p>
+              <p className="text-sm text-white/30 mt-1">or click to browse</p>
+              <p className="text-xs text-white/20 mt-3">MP4, MOV, MKV, AVI supported</p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Game preset ─────────────────────────────────────────────────── */}
       <div className="mt-8">
@@ -190,9 +234,10 @@ export default function UploadPage() {
               if (!next) {
                 setDetecting(false);
                 detectAbortRef.current?.abort();
-              } else if (file) {
-                // Re-trigger detection
-                setFile((f) => f ? new File([f], f.name, { type: f.type }) : f);
+              } else if (fileOrPath) {
+                // Re-trigger detection by bumping the file state
+                if (file) setFile((f) => f ? new File([f], f.name, { type: f.type }) : f);
+                else setTauriPath((p) => p ? p + "" : p);
               }
             }}
             className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-all border
@@ -312,9 +357,9 @@ export default function UploadPage() {
       {/* Analyze button */}
       <button
         onClick={handleAnalyze}
-        disabled={!file || loading || detecting}
+        disabled={!fileOrPath || loading || detecting}
         className={`mt-8 w-full py-3 rounded-xl font-semibold text-base transition-all
-          ${file && !loading && !detecting
+          ${fileOrPath && !loading && !detecting
             ? "bg-indigo-600 hover:bg-indigo-500 text-white"
             : "bg-white/5 text-white/30 cursor-not-allowed"
           }`}

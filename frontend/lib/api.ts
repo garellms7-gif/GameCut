@@ -6,10 +6,26 @@ import type {
   PresetDetectionResult,
 } from "./types";
 
-const API_BASE = "/api";
+// In a Tauri desktop build the Next.js proxy rewrites are not available —
+// call the FastAPI backend directly.  In a browser context keep the /api proxy.
+function apiBase(): string {
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    return "http://localhost:8000";
+  }
+  return "/api";
+}
+
+/** Append either a File (browser upload) or a local path string (Tauri). */
+function appendFile(form: FormData, fileOrPath: File | string): void {
+  if (typeof fileOrPath === "string") {
+    form.append("file_path", fileOrPath);
+  } else {
+    form.append("file", fileOrPath);
+  }
+}
 
 export async function analyzeVideo(
-  file: File,
+  fileOrPath: File | string,
   gamePreset: string,
   deadZoneSensitivity: number,
   hypeSensitivity: number,
@@ -17,9 +33,10 @@ export async function analyzeVideo(
   jobId?: string,
 ): Promise<AnalysisResult> {
   const id = jobId ?? crypto.randomUUID();
+  const base = apiBase();
 
   const form = new FormData();
-  form.append("file", file);
+  appendFile(form, fileOrPath);
   form.append("game_preset", gamePreset);
   form.append("dead_zone_sensitivity", String(deadZoneSensitivity));
   form.append("hype_sensitivity", String(hypeSensitivity));
@@ -31,7 +48,7 @@ export async function analyzeVideo(
   // Poll /status while the blocking fetch runs
   let pollHandle: ReturnType<typeof setInterval> | null = setInterval(async () => {
     try {
-      const r = await fetch(`${API_BASE}/status/${id}`);
+      const r = await fetch(`${base}/status/${id}`);
       if (!r.ok) return;
       const s = await r.json();
       const completed: number = s.completed_chunks ?? 0;
@@ -44,7 +61,7 @@ export async function analyzeVideo(
   }, 1000);
 
   try {
-    const res = await fetch(`${API_BASE}/analyze`, {
+    const res = await fetch(`${base}/analyze`, {
       method: "POST",
       body: form,
     });
@@ -65,16 +82,16 @@ export async function analyzeVideo(
 }
 
 export async function fetchPresets(): Promise<Record<string, { name: string; description: string }>> {
-  const res = await fetch(`${API_BASE}/presets`);
+  const res = await fetch(`${apiBase()}/presets`);
   if (!res.ok) throw new Error("Failed to load presets");
   return res.json();
 }
 
-export async function detectPreset(file: File): Promise<PresetDetectionResult> {
+export async function detectPreset(fileOrPath: File | string): Promise<PresetDetectionResult> {
   const form = new FormData();
-  form.append("file", file);
+  appendFile(form, fileOrPath);
 
-  const res = await fetch(`${API_BASE}/detect-preset`, {
+  const res = await fetch(`${apiBase()}/detect-preset`, {
     method: "POST",
     body: form,
   });
@@ -99,7 +116,7 @@ export async function submitFeedback(
     form.append("score", String(payload.score));
   }
 
-  const res = await fetch(`${API_BASE}/feedback`, {
+  const res = await fetch(`${apiBase()}/feedback`, {
     method: "POST",
     body: form,
   });
@@ -113,17 +130,17 @@ export async function submitFeedback(
 }
 
 export async function assembleHighlights(
-  file: File,
+  fileOrPath: File | string,
   highlights: Highlight[],
   onProgress?: (pct: number, label: string) => void,
 ): Promise<Blob> {
   const form = new FormData();
-  form.append("file", file);
+  appendFile(form, fileOrPath);
   form.append("highlights_json", JSON.stringify(highlights));
 
   onProgress?.(5, "Uploading video...");
 
-  const res = await fetch(`${API_BASE}/assemble`, {
+  const res = await fetch(`${apiBase()}/assemble`, {
     method: "POST",
     body: form,
   });

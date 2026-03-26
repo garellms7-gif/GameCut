@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { Timeline } from "@/components/Timeline";
 import type { ConfirmationState } from "@/components/Timeline";
 import { assembleHighlights, formatTime, submitFeedback } from "@/lib/api";
-import { getUploadedFile } from "@/lib/fileStore";
+import { getUploadedFile, getUploadedFilePath } from "@/lib/fileStore";
+import { isTauri, localFileUrl } from "@/lib/tauri";
 import type {
   AnalysisResult,
   FeedbackVote,
@@ -35,11 +36,23 @@ export default function ResultsPage() {
   const [confirmations, setConfirmations] = useState<Map<string, ConfirmationState>>(new Map());
 
   useEffect(() => {
-    const file = getUploadedFile();
-    if (!file) return;
-    const url = URL.createObjectURL(file);
-    setVideoObjectUrl(url);
-    return () => URL.revokeObjectURL(url);
+    let objectUrl: string | null = null;
+    (async () => {
+      if (isTauri()) {
+        const path = getUploadedFilePath();
+        if (!path) return;
+        const url = await localFileUrl(path);
+        if (url) setVideoObjectUrl(url);
+      } else {
+        const file = getUploadedFile();
+        if (!file) return;
+        objectUrl = URL.createObjectURL(file);
+        setVideoObjectUrl(objectUrl);
+      }
+    })();
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
   }, []);
 
   const segKey = (seg: { type: string; start: number; end: number }) =>
@@ -221,7 +234,9 @@ export default function ResultsPage() {
   const handleAssemble = async () => {
     if (!result) return;
     const sourceFile = getUploadedFile();
-    if (!sourceFile) {
+    const sourcePath = getUploadedFilePath();
+    const source: File | string | null = isTauri() ? sourcePath : sourceFile;
+    if (!source) {
       setAssembleError("Original video not available. Please re-upload and analyze first.");
       return;
     }
@@ -232,7 +247,7 @@ export default function ResultsPage() {
     setAssembling(true);
     setAssembleError(null);
     try {
-      const blob = await assembleHighlights(sourceFile, result.highlights);
+      const blob = await assembleHighlights(source, result.highlights);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -356,7 +371,7 @@ export default function ResultsPage() {
           segments={edl.segments}
           totalDuration={duration}
           struggleZones={struggle_zones ?? []}
-          videoFile={getUploadedFile()}
+          videoFile={isTauri() ? null : getUploadedFile()}
           onSegmentSelect={setPreviewSegment}
           confirmations={confirmations}
         />

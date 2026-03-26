@@ -39,7 +39,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Load presets ───────────────────────────────────────────────────────────────
-PRESETS_PATH = Path(__file__).parent / "presets.json"
+# When packaged with PyInstaller, __file__ is inside the bundle.  Use sys._MEIPASS
+# as the base directory so presets.json is found from the extracted bundle root.
+import sys as _sys
+_BASE_DIR = Path(getattr(_sys, "_MEIPASS", None) or Path(__file__).parent)
+PRESETS_PATH = _BASE_DIR / "presets.json"
 with open(PRESETS_PATH) as f:
     PRESETS: dict = json.load(f)
 
@@ -253,7 +257,8 @@ def get_presets():
 
 @app.post("/detect-preset")
 async def detect_preset_endpoint(
-    file: UploadFile = File(..., description="Gameplay video file"),
+    file: Optional[UploadFile] = File(default=None, description="Gameplay video file"),
+    file_path: Optional[str] = Form(default=None, description="Local filesystem path (Tauri desktop mode)"),
 ):
     """
     Analyse the first 90 seconds of a video and classify it into a game preset.
@@ -267,14 +272,26 @@ async def detect_preset_endpoint(
     Returns the best-matching preset plus a full confidence distribution so the
     UI can show scores for all presets and let the user override the suggestion.
     """
-    suffix   = Path(file.filename or "upload.mp4").suffix or ".mp4"
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            tmp.write(await file.read())
+    if not file and not file_path:
+        raise HTTPException(status_code=400, detail="Provide either 'file' or 'file_path'.")
 
-        logger.info("Detecting preset for %r", file.filename)
+    tmp_path = None
+    own_tmp = False
+    try:
+        if file_path:
+            if not os.path.isabs(file_path) or not os.path.exists(file_path):
+                raise HTTPException(status_code=400, detail=f"file_path not found: {file_path}")
+            tmp_path = file_path
+            display_name = Path(file_path).name
+        else:
+            suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp_path = tmp.name
+                tmp.write(await file.read())
+            own_tmp = True
+            display_name = file.filename or "upload.mp4"
+
+        logger.info("Detecting preset for %r", display_name)
         result = detect_preset(tmp_path)
         logger.info(
             "Detected preset=%s confidence=%.2f signals=%s",
@@ -282,17 +299,20 @@ async def detect_preset_endpoint(
         )
         return JSONResponse(content=result)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Preset detection failed")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if tmp_path and os.path.exists(tmp_path):
+        if own_tmp and tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
 @app.post("/analyze")
 async def analyze(
-    file: UploadFile = File(..., description="Gameplay video file"),
+    file: Optional[UploadFile] = File(default=None, description="Gameplay video file"),
+    file_path: Optional[str] = Form(default=None, description="Local filesystem path (Tauri desktop mode)"),
     game_preset: str = Form("fps", description="Game preset key"),
     dead_zone_sensitivity: float = Form(1.0, description="Dead zone sensitivity multiplier (0.5–2.0)"),
     hype_sensitivity: float = Form(1.0, description="Hype detection sensitivity multiplier (0.5–2.0)"),
@@ -304,6 +324,9 @@ async def analyze(
 
     Returns a merged EDL with segments tagged as dead_zone, highlight, or keep.
     """
+    if not file and not file_path:
+        raise HTTPException(status_code=400, detail="Provide either 'file' or 'file_path'.")
+
     if game_preset not in PRESETS:
         raise HTTPException(
             status_code=400,
@@ -319,16 +342,26 @@ async def analyze(
     # Apply any accumulated user corrections to the preset thresholds
     preset, threshold_adjustments = apply_corrections(game_preset, preset)
 
-    # Save upload to temp file
-    suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+    # Resolve video path — either from upload or from the Tauri local path.
     tmp_path = None
+    own_tmp = False
+    orig_filename: str
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            content = await file.read()
-            tmp.write(content)
+        if file_path:
+            if not os.path.isabs(file_path) or not os.path.exists(file_path):
+                raise HTTPException(status_code=400, detail=f"file_path not found: {file_path}")
+            tmp_path = file_path
+            own_tmp = False
+            orig_filename = Path(file_path).name
+        else:
+            suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp_path = tmp.name
+                tmp.write(await file.read())
+            own_tmp = True
+            orig_filename = file.filename or "upload.mp4"
 
-        logger.info(f"Analyzing {file.filename!r} with preset={game_preset}")
+        logger.info(f"Analyzing {orig_filename!r} with preset={game_preset}")
 
         duration = _get_video_duration(tmp_path)
         fps = _get_video_fps(tmp_path)
@@ -417,14 +450,14 @@ async def analyze(
             dead_zones=dead_zones,
             highlights=highlights,
             video_duration=duration,
-            source_name=Path(file.filename or "CLIP").stem[:8].upper(),
+            source_name=Path(orig_filename).stem[:8].upper(),
             struggle_zones=struggle_zones,
         )
 
         response_data = {
             "preset": game_preset,
             "preset_name": preset["name"],
-            "filename": file.filename,
+            "filename": orig_filename,
             "duration": duration,
             "fps": fps,
             "audio_tracks": audio_track_meta,
@@ -448,7 +481,7 @@ async def analyze(
             )
         elif export_format == "capcut":
             return PlainTextResponse(
-                to_capcut(edl, fps=fps, source_filename=file.filename or ""),
+                to_capcut(edl, fps=fps, source_filename=orig_filename),
                 media_type="application/json",
                 headers={"Content-Disposition": 'attachment; filename="draft_content.json"'},
             )
@@ -457,8 +490,8 @@ async def analyze(
                 "json": json.loads(to_json(edl)),
                 "csv": to_csv(edl),
                 "edl": to_edl(edl, fps=fps),
-                "fcpxml": to_fcpxml(edl, fps=fps, source_filename=file.filename or "source.mp4"),
-                "capcut": to_capcut(edl, fps=fps, source_filename=file.filename or ""),
+                "fcpxml": to_fcpxml(edl, fps=fps, source_filename=orig_filename),
+                "capcut": to_capcut(edl, fps=fps, source_filename=orig_filename),
             }
 
         return JSONResponse(content=response_data)
@@ -469,7 +502,7 @@ async def analyze(
         logger.exception("Analysis failed")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if tmp_path and os.path.exists(tmp_path):
+        if own_tmp and tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
@@ -607,7 +640,8 @@ async def export_edl(
 
 @app.post("/assemble")
 async def assemble_highlight_reel(
-    file: UploadFile = File(..., description="Original gameplay video"),
+    file: Optional[UploadFile] = File(default=None, description="Original gameplay video"),
+    file_path: Optional[str] = Form(default=None, description="Local filesystem path (Tauri desktop mode)"),
     highlights_json: str = Form(..., description="JSON array of highlight segments from /analyze"),
 ):
     """
@@ -627,22 +661,34 @@ async def assemble_highlight_reel(
     if not highlights:
         raise HTTPException(status_code=400, detail="No highlights provided.")
 
+    if not file and not file_path:
+        raise HTTPException(status_code=400, detail="Provide either 'file' or 'file_path'.")
+
     # Sort best-first
     highlights = sorted(highlights, key=lambda h: h.get("composite_score", 0.0), reverse=True)
 
-    suffix   = Path(file.filename or "upload.mp4").suffix or ".mp4"
     tmp_video = None
+    own_tmp_video = False
     tmp_dir   = None
 
     try:
-        # ── Save upload ────────────────────────────────────────────────────────
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_video = tmp.name
-            tmp.write(await file.read())
+        # ── Resolve source video ───────────────────────────────────────────────
+        if file_path:
+            if not os.path.isabs(file_path) or not os.path.exists(file_path):
+                raise HTTPException(status_code=400, detail=f"file_path not found: {file_path}")
+            tmp_video = file_path
+            display_src = Path(file_path).name
+        else:
+            suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp_video = tmp.name
+                tmp.write(await file.read())
+            own_tmp_video = True
+            display_src = file.filename or "upload.mp4"
 
         logger.info(
             "Assembling %d highlights from %r",
-            len(highlights), file.filename,
+            len(highlights), display_src,
         )
 
         fps   = _get_video_fps(tmp_video)
@@ -726,7 +772,7 @@ async def assemble_highlight_reel(
         with open(output_path, "rb") as fout:
             video_bytes = fout.read()
 
-        stem = Path(file.filename or "clip").stem
+        stem = Path(display_src).stem
         logger.info(
             "Assembled reel: %d clips, %.1f MB",
             len(clip_paths), len(video_bytes) / 1_048_576,
@@ -747,7 +793,20 @@ async def assemble_highlight_reel(
         logger.exception("Assemble failed")
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
-        if tmp_video and os.path.exists(tmp_video):
+        if own_tmp_video and tmp_video and os.path.exists(tmp_video):
             os.unlink(tmp_video)
         if tmp_dir and os.path.exists(tmp_dir):
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ── Sidecar entry point (used by PyInstaller / Tauri) ─────────────────────────
+if __name__ == "__main__":
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="GameCut FastAPI backend")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+
+    uvicorn.run(app, host=args.host, port=args.port)
