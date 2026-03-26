@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Timeline } from "@/components/Timeline";
 import { assembleHighlights, formatTime, submitFeedback } from "@/lib/api";
@@ -9,6 +9,7 @@ import type {
   AnalysisResult,
   FeedbackVote,
   Highlight,
+  Segment,
   StruggleZone,
   ThresholdAdjustment,
 } from "@/lib/types";
@@ -24,6 +25,36 @@ export default function ResultsPage() {
   // Highlight reel assembly
   const [assembling, setAssembling] = useState(false);
   const [assembleError, setAssembleError] = useState<string | null>(null);
+  // Video preview panel
+  const [previewSegment, setPreviewSegment] = useState<Segment | null>(null);
+  const [videoObjectUrl, setVideoObjectUrl] = useState<string | null>(null);
+  // Per-segment approve / reject actions (key → action)
+  const [segmentActions, setSegmentActions] = useState<Map<string, "approved" | "rejected">>(new Map());
+
+  useEffect(() => {
+    const file = getUploadedFile();
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    setVideoObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, []);
+
+  const segKey = (seg: { type: string; start: number; end: number }) =>
+    `${seg.type}:${seg.start}:${seg.end}`;
+
+  const handleSegmentAction = useCallback(
+    (seg: Segment, action: "approved" | "rejected") => {
+      setSegmentActions((prev) => {
+        const next = new Map(prev);
+        const k = segKey(seg);
+        // Toggle off if same action clicked twice
+        if (next.get(k) === action) next.delete(k);
+        else next.set(k, action);
+        return next;
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     const raw = sessionStorage.getItem("gc_result");
@@ -91,7 +122,21 @@ export default function ResultsPage() {
     }).exports;
 
     if (format === "json") {
-      content = JSON.stringify(result.edl, null, 2);
+      // Apply any approve/reject overrides to the EDL before export
+      const editedEdl = {
+        ...result.edl,
+        segments: result.edl.segments.map((s) => {
+          const k = segKey(s);
+          const action = segmentActions.get(k);
+          if (!action) return s;
+          return {
+            ...s,
+            type: action === "approved" ? "keep" : "dead_zone",
+            action,
+          };
+        }),
+      };
+      content = JSON.stringify(editedEdl, null, 2);
       mime = "application/json";
     } else if (format === "csv") {
       const rows = [
@@ -225,8 +270,26 @@ export default function ResultsPage() {
           totalDuration={duration}
           struggleZones={struggle_zones ?? []}
           videoFile={getUploadedFile()}
+          onSegmentSelect={setPreviewSegment}
         />
       </div>
+
+      {/* Video preview panel */}
+      {previewSegment && videoObjectUrl && (
+        <VideoPreview
+          segment={previewSegment}
+          videoUrl={videoObjectUrl}
+          action={segmentActions.get(segKey(previewSegment)) ?? null}
+          onApprove={() => handleSegmentAction(previewSegment, "approved")}
+          onReject={() => handleSegmentAction(previewSegment, "rejected")}
+          onClose={() => setPreviewSegment(null)}
+        />
+      )}
+      {previewSegment && !videoObjectUrl && (
+        <div className="bg-white/5 rounded-xl p-4 mb-6 border border-white/10 text-sm text-white/40">
+          Video preview unavailable — re-upload your file to enable playback.
+        </div>
+      )}
 
       {/* Feedback hint */}
       <p className="text-xs text-white/30 mb-3 pl-1">
@@ -262,6 +325,7 @@ export default function ResultsPage() {
               type={seg.type} start={seg.start} end={seg.end}
               duration={seg.duration} score={seg.score}
               currentVote={votes.get(`${seg.type}-${seg.start}-${seg.end}`) ?? null}
+              action={segmentActions.get(segKey(seg)) ?? null}
               onVote={(vote) =>
                 seg.type !== "keep" &&
                 handleVote(
@@ -270,6 +334,10 @@ export default function ResultsPage() {
                   seg.score, seg.duration,
                 )
               }
+              onPreview={() => setPreviewSegment(
+                previewSegment?.start === seg.start && previewSegment.end === seg.end
+                  ? null : seg
+              )}
             />
           ))}
 
@@ -427,7 +495,8 @@ function FeedbackButtons({
 }
 
 function SegmentRow({
-  index, type, start, end, duration, score, currentVote, onVote,
+  index, type, start, end, duration, score,
+  currentVote, action, onVote, onPreview,
 }: {
   index: number;
   type: string;
@@ -436,9 +505,15 @@ function SegmentRow({
   duration: number;
   score: number | null;
   currentVote: FeedbackVote | null;
+  action: "approved" | "rejected" | null;
   onVote: (v: FeedbackVote) => void;
+  onPreview?: () => void;
 }) {
   const showFeedback = type !== "keep";
+  const actionBadge =
+    action === "approved" ? "bg-green-500/20 text-green-400" :
+    action === "rejected" ? "bg-red-500/20 text-red-400" : null;
+
   return (
     <div className={`flex items-center gap-3 p-3 rounded-lg border bg-white/[0.02] text-sm ${SEG_COLORS[type] || "border-white/10 text-white/60"}`}>
       <span className="text-white/20 w-6 text-right text-xs">{index}</span>
@@ -449,6 +524,20 @@ function SegmentRow({
       <span className="ml-auto text-white/30 text-xs">{duration.toFixed(2)}s</span>
       {score !== null && (
         <span className="text-xs font-mono w-10 text-right">{(score * 100).toFixed(0)}%</span>
+      )}
+      {actionBadge && (
+        <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${actionBadge}`}>
+          {action === "approved" ? "✓ keep" : "✕ cut"}
+        </span>
+      )}
+      {onPreview && (
+        <button
+          onClick={onPreview}
+          title="Preview segment"
+          className="w-6 h-6 rounded flex items-center justify-center text-xs text-white/20 hover:text-white/60 hover:bg-white/10 transition-all"
+        >
+          ▶
+        </button>
       )}
       {showFeedback && (
         <FeedbackButtons currentVote={currentVote} onVote={onVote} />
@@ -521,6 +610,134 @@ function StruggleZoneRow({ sz, index }: { sz: StruggleZone; index: number }) {
       <span className="text-xs px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300 font-mono">
         MONTAGE
       </span>
+    </div>
+  );
+}
+
+// ── VideoPreview ──────────────────────────────────────────────────────────────
+
+const PREVIEW_TYPE_COLOR: Record<string, string> = {
+  dead_zone: "text-red-400",
+  highlight: "text-green-400",
+  keep:      "text-yellow-400",
+};
+const PREVIEW_TYPE_BORDER: Record<string, string> = {
+  dead_zone: "border-red-500/30 bg-red-500/5",
+  highlight: "border-green-500/30 bg-green-500/5",
+  keep:      "border-yellow-500/30 bg-yellow-500/5",
+};
+
+function VideoPreview({
+  segment, videoUrl, action, onApprove, onReject, onClose,
+}: {
+  segment: Segment;
+  videoUrl: string;
+  action: "approved" | "rejected" | null;
+  onApprove: () => void;
+  onReject: () => void;
+  onClose: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Seek and play whenever the segment changes
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    let done = false;
+    video.currentTime = segment.start;
+    video.play().catch(() => {});
+
+    const onTimeUpdate = () => {
+      if (!done && video.currentTime >= segment.end) {
+        done = true;
+        video.pause();
+      }
+    };
+    // Reset done flag when seeking back manually
+    const onSeeked = () => { done = false; };
+
+    video.addEventListener("timeupdate", onTimeUpdate);
+    video.addEventListener("seeked", onSeeked);
+    return () => {
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      video.removeEventListener("seeked", onSeeked);
+    };
+  }, [segment]);
+
+  const typeColor  = PREVIEW_TYPE_COLOR[segment.type]  ?? "text-white/60";
+  const typeBorder = PREVIEW_TYPE_BORDER[segment.type] ?? "border-white/10 bg-white/5";
+
+  return (
+    <div className={`rounded-xl p-4 border mb-6 ${typeBorder}`}>
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <span className={`text-xs font-bold uppercase tracking-wider ${typeColor}`}>
+          {SEG_LABELS[segment.type] ?? segment.type}
+        </span>
+        <span className="font-mono text-xs text-white/50">
+          {formatTime(segment.start)} → {formatTime(segment.end)}
+        </span>
+        <span className="text-xs text-white/30">{segment.duration.toFixed(2)} s</span>
+        {segment.score !== null && (
+          <span className={`text-xs font-mono ${typeColor}`}>
+            score {((segment.score ?? 0) * 100).toFixed(0)}%
+          </span>
+        )}
+        <button
+          onClick={onClose}
+          className="ml-auto text-white/25 hover:text-white/60 text-sm"
+        >✕</button>
+      </div>
+
+      {/* Player */}
+      <video
+        ref={videoRef}
+        src={videoUrl}
+        controls
+        className="w-full rounded-lg bg-black"
+        style={{ maxHeight: "360px" }}
+      />
+
+      {/* Actions */}
+      <div className="flex items-center gap-3 mt-3">
+        <button
+          onClick={onApprove}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold transition-all
+            ${action === "approved"
+              ? "bg-green-500 text-white shadow-lg shadow-green-500/30"
+              : "bg-green-500/15 text-green-400 hover:bg-green-500/25"}`}
+        >
+          ✓ Approve
+        </button>
+        <button
+          onClick={onReject}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold transition-all
+            ${action === "rejected"
+              ? "bg-red-500 text-white shadow-lg shadow-red-500/30"
+              : "bg-red-500/15 text-red-400 hover:bg-red-500/25"}`}
+        >
+          ✕ Reject
+        </button>
+        <button
+          onClick={() => {
+            const v = videoRef.current;
+            if (v) { v.currentTime = segment.start; v.play().catch(() => {}); }
+          }}
+          className="ml-auto text-xs text-white/30 hover:text-white/60 flex items-center gap-1 transition-colors"
+        >
+          ↺ Replay
+        </button>
+      </div>
+
+      {action && (
+        <p className={`text-xs mt-2 font-medium
+          ${action === "approved" ? "text-green-400" : "text-red-400"}`}>
+          {action === "approved"
+            ? "✓ Marked as keep — will appear in EDL export as keep"
+            : "✕ Marked for removal — will appear in EDL export as dead_zone"}
+        </p>
+      )}
     </div>
   );
 }

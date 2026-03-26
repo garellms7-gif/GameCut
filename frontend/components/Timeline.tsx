@@ -110,6 +110,7 @@ interface TimelineProps {
   totalDuration: number;
   struggleZones?: StruggleZone[];
   videoFile?: File | null;
+  onSegmentSelect?: (seg: Segment | null) => void;
 }
 
 export function Timeline({
@@ -117,6 +118,7 @@ export function Timeline({
   totalDuration,
   struggleZones = [],
   videoFile,
+  onSegmentSelect,
 }: TimelineProps) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const scrollRef    = useRef<HTMLDivElement>(null);
@@ -296,12 +298,15 @@ export function Timeline({
       const sz = struggleZones.find(z => t >= z.start && t <= z.end);
       if (sz) {
         setActive(null);
+        onSegmentSelect?.(null);
         setActiveStruggle(activeStruggle?.start === sz.start ? null : sz);
         return;
       }
       const seg = segAt(t, segments);
+      const next = seg && active?.start === seg.start ? null : seg ?? null;
       setActiveStruggle(null);
-      setActive(seg && active?.start === seg.start ? null : seg ?? null);
+      setActive(next);
+      onSegmentSelect?.(next);
     },
     [canvasW, totalDuration, segments, struggleZones, active, activeStruggle],
   );
