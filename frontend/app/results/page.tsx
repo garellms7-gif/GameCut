@@ -524,6 +524,26 @@ export default function ResultsPage() {
           <p className="mt-2 text-xs text-red-400">{assembleError}</p>
         )}
       </div>
+
+      {/* Shorts Slicer */}
+      <div className="border-t border-white/10 pt-6 mt-2">
+        <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-2">Shorts Slicer</h2>
+        <p className="text-xs text-white/40 mb-4">
+          Crop all {highlights.length} highlight{highlights.length !== 1 ? "s" : ""} to vertical
+          9:16 — individual MP4s ready to upload as Shorts, Reels, or TikToks.
+        </p>
+        <button
+          onClick={() => {
+            sessionStorage.setItem("gc_shorts_highlights", JSON.stringify(highlights));
+            router.push("/shorts");
+          }}
+          disabled={highlights.length === 0}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-violet-600 hover:bg-violet-500
+            disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
+        >
+          ↕ Send to Shorts Slicer ({highlights.length})
+        </button>
+      </div>
     </div>
   );
 }

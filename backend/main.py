@@ -905,6 +905,122 @@ async def assemble_highlight_reel(
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+@app.post("/slice-shorts")
+async def slice_shorts(
+    file: Optional[UploadFile] = File(default=None, description="Original gameplay video"),
+    file_path: Optional[str] = Form(default=None, description="Local filesystem path (Tauri desktop mode)"),
+    segments_json: str = Form(..., description="JSON array of highlight segments to export"),
+    crop_center_pct: float = Form(default=50.0, description="Horizontal crop center 0–100 (50 = center)"),
+):
+    """
+    Export highlight segments as individual vertical 9:16 clips, returned as a .zip archive.
+
+    Each clip is center-cropped (or offset-cropped) from the landscape source and
+    scaled to 1080×1920, ready to upload as a Short, Reel, or TikTok.
+    """
+    import zipfile as _zipfile
+
+    try:
+        segments: list[dict] = json.loads(segments_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid segments_json: {exc}")
+
+    if not segments:
+        raise HTTPException(status_code=400, detail="No segments provided.")
+    if not file and not file_path:
+        raise HTTPException(status_code=400, detail="Provide either 'file' or 'file_path'.")
+
+    crop_center_pct = max(0.0, min(100.0, crop_center_pct))
+
+    tmp_video = None
+    own_tmp_video = False
+    tmp_dir = None
+
+    try:
+        if file_path:
+            if not os.path.isabs(file_path) or not os.path.exists(file_path):
+                raise HTTPException(status_code=400, detail=f"file_path not found: {file_path}")
+            tmp_video = file_path
+            stem = Path(file_path).stem
+        else:
+            suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp_video = tmp.name
+                tmp.write(await file.read())
+            own_tmp_video = True
+            stem = Path(file.filename or "upload").stem
+
+        tmp_dir = tempfile.mkdtemp()
+
+        # crop_w must be divisible by 2 (libx264 requirement)
+        # x offset scales from 0 (left) to 1 (right) within the available horizontal range
+        w_expr = "trunc(ih*9/16/2)*2"
+        x_pct  = crop_center_pct / 100.0
+        x_expr = f"(iw-{w_expr})*{x_pct:.6f}"
+        vf     = f"crop={w_expr}:ih:{x_expr}:0,scale=1080:1920:flags=lanczos"
+
+        clip_paths: list[tuple[str, str]] = []  # (filesystem path, zip entry name)
+        for i, seg in enumerate(segments):
+            label     = seg.get("manual_type") or f"hl{i + 1:02d}"
+            clip_name = f"{stem}_short_{i + 1:02d}_{label}.mp4"
+            clip_path = os.path.join(tmp_dir, clip_name)
+
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-ss", str(seg["start"]),
+                    "-i",  tmp_video,
+                    "-t",  str(seg["duration"]),
+                    "-vf", vf,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    clip_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+
+            if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
+                clip_paths.append((clip_path, clip_name))
+            else:
+                logger.warning("Shorts clip %d failed or produced no output — skipping", i)
+
+        if not clip_paths:
+            raise HTTPException(status_code=500, detail="All clip extractions failed.")
+
+        zip_path = os.path.join(tmp_dir, f"{stem}_shorts.zip")
+        with _zipfile.ZipFile(zip_path, "w", _zipfile.ZIP_DEFLATED) as zf:
+            for clip_path, clip_name in clip_paths:
+                zf.write(clip_path, clip_name)
+
+        with open(zip_path, "rb") as fzip:
+            zip_bytes = fzip.read()
+
+        logger.info(
+            "Sliced %d shorts (%.1f MB zip) from %r",
+            len(clip_paths), len(zip_bytes) / 1_048_576, stem,
+        )
+
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{stem}_shorts.zip"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("slice-shorts failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if own_tmp_video and tmp_video and os.path.exists(tmp_video):
+            os.unlink(tmp_video)
+        if tmp_dir and os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 # ── Sidecar entry point (used by PyInstaller / Tauri) ─────────────────────────
 if __name__ == "__main__":
     import argparse

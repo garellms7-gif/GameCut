@@ -133,6 +133,29 @@ export async function submitFeedback(
   return res.json();
 }
 
+export async function sliceShorts(
+  fileOrPath: File | string,
+  segments: Highlight[],
+  cropCenterPct: number = 50,
+): Promise<Blob> {
+  const form = new FormData();
+  appendFile(form, fileOrPath);
+  form.append("segments_json", JSON.stringify(segments));
+  form.append("crop_center_pct", String(cropCenterPct));
+
+  const res = await fetch(`${apiBase()}/slice-shorts`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Shorts slicing failed");
+  }
+
+  return res.blob();
+}
+
 export async function assembleHighlights(
   fileOrPath: File | string,
   highlights: Highlight[],
