@@ -1,13 +1,15 @@
 """
 EDL Exporter
 Merges dead zone and hype moment results into a unified Edit Decision List.
-Outputs JSON, CSV, and DaVinci Resolve-compatible .edl formats.
+Outputs JSON, CSV, DaVinci Resolve-compatible .edl, and FCPXML 1.10 formats.
 """
 
 import csv
 import io
 import json
 import math
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Union
 
 
@@ -256,3 +258,158 @@ def _seconds_to_timecode(seconds: float, fps: float) -> str:
     mins = (total_seconds // 60) % 60
     hours = total_seconds // 3600
     return f"{hours:02d}:{mins:02d}:{secs:02d}:{frames:02d}"
+
+
+# ─── FCPXML 1.10 export ────────────────────────────────────────────────────────
+
+def _to_rational_time(seconds: float, fps: int) -> str:
+    """Convert seconds to FCPXML rational time string, e.g. '900/30s'."""
+    if seconds <= 0:
+        return "0s"
+    frames = round(seconds * fps)
+    return f"{frames}/{fps}s"
+
+
+def to_fcpxml(
+    edl: dict,
+    fps: float = 30.0,
+    source_filename: str = "source.mp4",
+) -> str:
+    """
+    Generate a DaVinci Resolve-compatible FCPXML 1.10 document.
+
+    Mapping:
+      dead_zone     → <gap>  element (empty/black region in the timeline)
+      keep          → <clip> element referencing the source asset
+      highlight     → <clip> element with a green <marker> at the clip in-point
+      struggle_zone → orange <marker> on the keep/highlight clip where the zone begins
+
+    The returned string is a complete XML document ready to save as
+    ``gamecut_timeline.fcpxml`` and import into DaVinci Resolve.
+    """
+    fps_int = max(1, round(fps))
+    frame_dur = f"1/{fps_int}s"
+
+    total_dur = edl["summary"]["total_duration"]
+    total_dur_str = _to_rational_time(total_dur, fps_int)
+
+    source_stem = Path(source_filename).stem if source_filename else "source"
+
+    # ── Resources ─────────────────────────────────────────────────────────────
+    fcpxml_el = ET.Element("fcpxml", version="1.10")
+
+    resources = ET.SubElement(fcpxml_el, "resources")
+    ET.SubElement(
+        resources, "format",
+        id="r1",
+        name=f"FFVideoFormat{fps_int}",
+        frameDuration=frame_dur,
+        width="1920",
+        height="1080",
+    )
+    asset = ET.SubElement(
+        resources, "asset",
+        id="r2",
+        name=source_stem,
+        start="0s",
+        duration=total_dur_str,
+        hasVideo="1",
+        hasAudio="1",
+        audioSources="1",
+        audioChannels="2",
+        audioRate="48000",
+    )
+    ET.SubElement(
+        asset, "media-rep",
+        kind="original-media",
+        src=f"file:///{source_filename}",
+    )
+
+    # ── Timeline ──────────────────────────────────────────────────────────────
+    library  = ET.SubElement(fcpxml_el, "library")
+    event    = ET.SubElement(library, "event",    name="GameCut Export")
+    project  = ET.SubElement(event,   "project",  name="GameCut Timeline")
+    sequence = ET.SubElement(
+        project, "sequence",
+        duration=total_dur_str,
+        format="r1",
+        tcStart="0s",
+        tcFormat="NDF",
+        audioLayout="stereo",
+        audioRate="48k",
+    )
+    spine = ET.SubElement(sequence, "spine")
+
+    struggle_zones: list[dict] = edl.get("struggle_zones", [])
+
+    for seg in edl["segments"]:
+        seg_start  = seg["start"]
+        seg_end    = seg["end"]
+        seg_dur    = seg["duration"]
+        seg_type   = seg["type"]
+
+        offset_str = _to_rational_time(seg_start, fps_int)
+        dur_str    = _to_rational_time(seg_dur,   fps_int)
+        src_str    = _to_rational_time(seg_start, fps_int)
+
+        if seg_type == "dead_zone":
+            ET.SubElement(
+                spine, "gap",
+                name="Dead Zone",
+                offset=offset_str,
+                duration=dur_str,
+                start="0s",
+            )
+        else:
+            label = "Highlight" if seg_type == "highlight" else "Keep"
+            clip = ET.SubElement(
+                spine, "clip",
+                name=label,
+                ref="r2",
+                offset=offset_str,
+                duration=dur_str,
+                start=src_str,
+            )
+
+            # Highlight: green marker at the clip's in-point
+            if seg_type == "highlight":
+                score = seg.get("score") or 0.0
+                note  = f"GameCut Highlight score={score:.2f}" if score else "GameCut Highlight"
+                ET.SubElement(
+                    clip, "marker",
+                    start=src_str,
+                    duration=frame_dur,
+                    value="HIGHLIGHT",
+                    note=note,
+                    **{"completed": "0"},
+                )
+
+            # Struggle zones: orange marker at the zone's source in-point
+            for sz in struggle_zones:
+                if seg_start <= sz["start"] < seg_end:
+                    sz_src_str = _to_rational_time(sz["start"], fps_int)
+                    ET.SubElement(
+                        clip, "marker",
+                        start=sz_src_str,
+                        duration=frame_dur,
+                        value="MONTAGE_CANDIDATE",
+                        note=(
+                            f"Struggle Zone — {sz['dead_zone_count']} dead zones, "
+                            f"{sz['duration']:.1f}s window"
+                        ),
+                        **{"completed": "0"},
+                    )
+
+    # Pretty-print (Python ≥ 3.9)
+    try:
+        ET.indent(fcpxml_el, space="  ")
+    except AttributeError:
+        pass  # Python < 3.9 — output will be on one line, still valid XML
+
+    xml_body = ET.tostring(fcpxml_el, encoding="unicode", xml_declaration=False)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<!DOCTYPE fcpxml>\n"
+        + xml_body
+        + "\n"
+    )

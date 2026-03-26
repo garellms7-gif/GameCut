@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Timeline } from "@/components/Timeline";
-import { formatTime, submitFeedback } from "@/lib/api";
+import { assembleHighlights, formatTime, submitFeedback } from "@/lib/api";
+import { getUploadedFile } from "@/lib/fileStore";
 import type {
   AnalysisResult,
   FeedbackVote,
@@ -20,6 +21,9 @@ export default function ResultsPage() {
   const [votes, setVotes] = useState<Map<string, FeedbackVote>>(new Map());
   // Toast message
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  // Highlight reel assembly
+  const [assembling, setAssembling] = useState(false);
+  const [assembleError, setAssembleError] = useState<string | null>(null);
 
   useEffect(() => {
     const raw = sessionStorage.getItem("gc_result");
@@ -79,10 +83,10 @@ export default function ResultsPage() {
   const hasAdjustments = threshold_adjustments && Object.keys(threshold_adjustments).length > 0;
   const hasStruggleZones = (struggle_zones ?? []).length > 0;
 
-  const handleExport = (format: "json" | "csv" | "edl") => {
+  const handleExport = (format: "json" | "csv" | "edl" | "fcpxml") => {
     let content = "";
     let mime = "text/plain";
-    const ext = format;
+    const exports = (result as unknown as { exports?: { edl?: string; fcpxml?: string } }).exports;
 
     if (format === "json") {
       content = JSON.stringify(result.edl, null, 2);
@@ -95,17 +99,50 @@ export default function ResultsPage() {
       content = rows.map((r) => r.join(",")).join("\n");
       mime = "text/csv";
     } else if (format === "edl") {
-      const exports = (result as unknown as { exports?: { edl?: string } }).exports;
       content = exports?.edl ?? "EDL export not available. Re-analyze with export_format=all.";
+    } else if (format === "fcpxml") {
+      content = exports?.fcpxml ?? "FCPXML export not available. Re-analyze with export_format=all.";
+      mime = "application/xml";
     }
 
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `gamecut_${filename?.replace(/\.[^.]+$/, "") ?? "export"}.${ext}`;
+    a.download = format === "fcpxml"
+      ? "gamecut_timeline.fcpxml"
+      : `gamecut_${filename?.replace(/\.[^.]+$/, "") ?? "export"}.${format}`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleAssemble = async () => {
+    if (!result) return;
+    const sourceFile = getUploadedFile();
+    if (!sourceFile) {
+      setAssembleError("Original video not available. Please re-upload and analyze first.");
+      return;
+    }
+    if (!result.highlights || result.highlights.length === 0) {
+      setAssembleError("No highlight segments detected to assemble.");
+      return;
+    }
+    setAssembling(true);
+    setAssembleError(null);
+    try {
+      const blob = await assembleHighlights(sourceFile, result.highlights);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const stem = result.filename?.replace(/\.[^.]+$/, "") ?? "clip";
+      a.download = `${stem}_highlights.mp4`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setAssembleError(err instanceof Error ? err.message : "Assembly failed");
+    } finally {
+      setAssembling(false);
+    }
   };
 
   return (
@@ -272,7 +309,38 @@ export default function ResultsPage() {
           <ExportButton onClick={() => handleExport("json")} label="EDL (JSON)" icon="📄" />
           <ExportButton onClick={() => handleExport("csv")} label="CSV" icon="📊" />
           <ExportButton onClick={() => handleExport("edl")} label="DaVinci EDL" icon="🎬" />
+          <ExportButton onClick={() => handleExport("fcpxml")} label="FCPXML (Resolve)" icon="🎞️" />
         </div>
+      </div>
+
+      {/* Assemble highlight reel */}
+      <div className="border-t border-white/10 pt-6">
+        <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-2">Highlight Reel</h2>
+        <p className="text-xs text-white/40 mb-4">
+          Extracts all highlight segments, sorts by score, and concatenates them with
+          0.5 s black transitions into a single downloadable MP4.
+        </p>
+        <button
+          onClick={handleAssemble}
+          disabled={assembling}
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500
+            disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
+        >
+          {assembling ? (
+            <>
+              <span className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              Assembling…
+            </>
+          ) : (
+            <>
+              <span>🎬</span>
+              Assemble Highlight Reel
+            </>
+          )}
+        </button>
+        {assembleError && (
+          <p className="mt-2 text-xs text-red-400">{assembleError}</p>
+        )}
       </div>
     </div>
   );

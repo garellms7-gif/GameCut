@@ -2,6 +2,7 @@ import type {
   AnalysisResult,
   FeedbackPayload,
   FeedbackResponse,
+  Highlight,
   PresetDetectionResult,
 } from "./types";
 
@@ -84,6 +85,31 @@ export async function submitFeedback(
   }
 
   return res.json();
+}
+
+export async function assembleHighlights(
+  file: File,
+  highlights: Highlight[],
+  onProgress?: (pct: number, label: string) => void,
+): Promise<Blob> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("highlights_json", JSON.stringify(highlights));
+
+  onProgress?.(5, "Uploading video...");
+
+  const res = await fetch(`${API_BASE}/assemble`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || "Assembly failed");
+  }
+
+  onProgress?.(100, "Complete");
+  return res.blob();
 }
 
 export function formatTime(seconds: number): string {

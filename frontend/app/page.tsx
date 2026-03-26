@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { analyzeVideo, detectPreset, fetchPresets } from "@/lib/api";
+import { setUploadedFile } from "@/lib/fileStore";
 import type { GamePreset, PresetDetectionResult } from "@/lib/types";
 
 const PRESET_LABELS: Record<GamePreset, string> = {
@@ -83,6 +84,7 @@ export default function UploadPage() {
 
   const handleFileSet = useCallback((f: File) => {
     setFile(f);
+    setUploadedFile(f);
     setError(null);
   }, []);
 

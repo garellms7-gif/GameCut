@@ -7,6 +7,7 @@ runs dead zone + hype moment detection, then returns a merged EDL.
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -15,7 +16,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from modules.audio_splitter import split_audio, VOCALS_LOWCUT_HZ, VOCALS_HIGHCUT_HZ
 from modules.corrections import (
@@ -26,7 +27,7 @@ from modules.corrections import (
 )
 from modules.dead_zone import detect_dead_zones, detect_struggle_zones
 from modules.hype_moment import detect_hype_moments
-from modules.edl_export import build_edl, to_json, to_csv, to_edl
+from modules.edl_export import build_edl, to_json, to_csv, to_edl, to_fcpxml
 from modules.preset_detector import detect_preset
 
 logging.basicConfig(level=logging.INFO)
@@ -89,6 +90,25 @@ def _get_video_fps(path: str) -> float:
         return float(num) / float(den)
     except Exception:
         return 30.0
+
+
+def _get_video_dimensions(path: str) -> tuple[int, int]:
+    """Use ffprobe to get video width and height."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            path,
+        ],
+        capture_output=True, text=True,
+    )
+    try:
+        w, h = result.stdout.strip().split(",")
+        return int(w), int(h)
+    except Exception:
+        return 1920, 1080
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -280,11 +300,18 @@ async def analyze(
             return PlainTextResponse(to_csv(edl), media_type="text/csv")
         elif export_format == "edl":
             return PlainTextResponse(to_edl(edl, fps=fps), media_type="text/plain")
+        elif export_format == "fcpxml":
+            return PlainTextResponse(
+                to_fcpxml(edl, fps=fps, source_filename=file.filename or "source.mp4"),
+                media_type="application/xml",
+                headers={"Content-Disposition": 'attachment; filename="gamecut_timeline.fcpxml"'},
+            )
         elif export_format == "all":
             response_data["exports"] = {
                 "json": json.loads(to_json(edl)),
                 "csv": to_csv(edl),
                 "edl": to_edl(edl, fps=fps),
+                "fcpxml": to_fcpxml(edl, fps=fps, source_filename=file.filename or "source.mp4"),
             }
 
         return JSONResponse(content=response_data)
@@ -399,7 +426,7 @@ async def export_edl(
     dead_zone_sensitivity: float = Form(1.0),
     hype_sensitivity: float = Form(1.0),
 ):
-    """Convenience endpoint: analyze and return a specific export format directly."""
+    """Convenience endpoint: analyze and return a specific export format directly. Formats: json | csv | edl | fcpxml | all"""
     return await analyze(
         file=file,
         game_preset=game_preset,
@@ -407,3 +434,151 @@ async def export_edl(
         hype_sensitivity=hype_sensitivity,
         export_format=format,
     )
+
+
+@app.post("/assemble")
+async def assemble_highlight_reel(
+    file: UploadFile = File(..., description="Original gameplay video"),
+    highlights_json: str = Form(..., description="JSON array of highlight segments from /analyze"),
+):
+    """
+    Assemble a highlight reel from HIGHLIGHT segments.
+
+    Accepts the original video and the JSON array of highlight objects returned
+    by /analyze.  Segments are sorted by composite_score descending, then
+    concatenated with a 0.5-second black-frame transition between each clip.
+
+    Returns a downloadable MP4 named ``<source>_highlights.mp4``.
+    """
+    try:
+        highlights: list[dict] = json.loads(highlights_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid highlights_json: {exc}")
+
+    if not highlights:
+        raise HTTPException(status_code=400, detail="No highlights provided.")
+
+    # Sort best-first
+    highlights = sorted(highlights, key=lambda h: h.get("composite_score", 0.0), reverse=True)
+
+    suffix   = Path(file.filename or "upload.mp4").suffix or ".mp4"
+    tmp_video = None
+    tmp_dir   = None
+
+    try:
+        # ── Save upload ────────────────────────────────────────────────────────
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_video = tmp.name
+            tmp.write(await file.read())
+
+        logger.info(
+            "Assembling %d highlights from %r",
+            len(highlights), file.filename,
+        )
+
+        fps   = _get_video_fps(tmp_video)
+        fps_int = max(1, round(fps))
+        width, height = _get_video_dimensions(tmp_video)
+
+        tmp_dir = tempfile.mkdtemp()
+
+        # ── Extract each highlight clip ────────────────────────────────────────
+        clip_paths: list[str] = []
+        for i, hl in enumerate(highlights):
+            clip_path = os.path.join(tmp_dir, f"clip_{i:03d}.mp4")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", tmp_video,
+                    "-ss", str(hl["start"]),
+                    "-t",  str(hl["duration"]),
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    clip_path,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
+                clip_paths.append(clip_path)
+            else:
+                logger.warning("Clip %d extraction failed or empty — skipping", i)
+
+        if not clip_paths:
+            raise HTTPException(status_code=500, detail="All clip extractions failed.")
+
+        # ── Create 0.5 s black transition clip ────────────────────────────────
+        black_path = os.path.join(tmp_dir, "black.mp4")
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i",
+                    f"color=black:size={width}x{height}:rate={fps_int}",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-t", "0.5",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:a", "aac", "-b:a", "192k",
+                black_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # ── Write concat list ──────────────────────────────────────────────────
+        list_path = os.path.join(tmp_dir, "filelist.txt")
+        with open(list_path, "w") as flist:
+            for i, clip in enumerate(clip_paths):
+                flist.write(f"file '{clip}'\n")
+                if i < len(clip_paths) - 1 and os.path.exists(black_path):
+                    flist.write(f"file '{black_path}'\n")
+
+        # ── Concatenate ────────────────────────────────────────────────────────
+        output_path = os.path.join(tmp_dir, "highlight_reel.mp4")
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", list_path,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                output_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+            raise HTTPException(
+                status_code=500,
+                detail="ffmpeg concat produced no output.",
+            )
+
+        with open(output_path, "rb") as fout:
+            video_bytes = fout.read()
+
+        stem = Path(file.filename or "clip").stem
+        logger.info(
+            "Assembled reel: %d clips, %.1f MB",
+            len(clip_paths), len(video_bytes) / 1_048_576,
+        )
+
+        return Response(
+            content=video_bytes,
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{stem}_highlights.mp4"',
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Assemble failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if tmp_video and os.path.exists(tmp_video):
+            os.unlink(tmp_video)
+        if tmp_dir and os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
