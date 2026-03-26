@@ -224,6 +224,7 @@ export default function ResultsPage() {
           segments={edl.segments}
           totalDuration={duration}
           struggleZones={struggle_zones ?? []}
+          videoFile={getUploadedFile()}
         />
       </div>
 
