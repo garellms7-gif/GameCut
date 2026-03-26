@@ -6,6 +6,11 @@ Analyzes the microphone/commentary track for:
   - Speech rate increases (onset density)
 
 Returns a ranked list of timestamped highlight moments with composite scores.
+
+When `vocals_path` is supplied (an 80 Hz – 3 kHz bandpass WAV produced by
+audio_splitter.split_audio), the internal ffmpeg extraction is skipped and
+that file is analysed directly, giving cleaner pitch and speech-rate readings
+by eliminating low-frequency game rumble and high-frequency SFX noise.
 """
 
 import os
@@ -30,15 +35,21 @@ def detect_hype_moments(
     preset: dict,
     sensitivity: float = 1.0,
     progress_callback: Optional[Callable] = None,
+    vocals_path: Optional[str] = None,
 ) -> list[dict]:
     """
     Detect hype moments from the mic/commentary audio track.
 
     Args:
-        video_path: Path to input video file.
+        video_path: Path to input video file (only used when vocals_path is None).
         preset: Preset config dict from presets.json.
         sensitivity: 0.5 = more sensitive, 2.0 = less sensitive.
         progress_callback: Optional callable(pct: float, label: str).
+        vocals_path: Optional path to a pre-split 80 Hz – 3 kHz bandpass WAV.
+            When provided the internal ffmpeg extraction is skipped entirely.
+            Using the bandpass-filtered vocals track removes low-frequency game
+            rumble and high-frequency SFX that would otherwise pollute pitch and
+            speech-rate measurements.
 
     Returns:
         List of dicts sorted by composite_score descending, each with:
@@ -54,31 +65,36 @@ def detect_hype_moments(
         if progress_callback:
             progress_callback(pct, label)
 
-    progress(0.0, "Extracting commentary track")
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_audio = tmp.name
-
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", video_path,
-                "-vn", "-acodec", "pcm_s16le",
-                "-ar", "22050", "-ac", "1",
-                tmp_audio,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        y, sr = librosa.load(tmp_audio, sr=22050, mono=True)
-    except Exception as e:
-        logger.error(f"Failed to extract audio: {e}")
-        return []
-    finally:
-        if os.path.exists(tmp_audio):
-            os.unlink(tmp_audio)
+    if vocals_path:
+        progress(0.0, "Using pre-split vocals track (80 Hz – 3 kHz bandpass)")
+        try:
+            y, sr = librosa.load(vocals_path, sr=22050, mono=True)
+        except Exception as e:
+            logger.error(f"Failed to load vocals WAV: {e}")
+            return []
+    else:
+        progress(0.0, "Extracting commentary track")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_audio = tmp.name
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-acodec", "pcm_s16le",
+                    "-ar", "22050", "-ac", "1",
+                    tmp_audio,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            y, sr = librosa.load(tmp_audio, sr=22050, mono=True)
+        except Exception as e:
+            logger.error(f"Failed to extract audio: {e}")
+            return []
+        finally:
+            if os.path.exists(tmp_audio):
+                os.unlink(tmp_audio)
 
     progress(0.2, "Computing volume envelope")
     volume_scores, frame_times = _compute_volume_scores(y, sr, volume_spike_db)

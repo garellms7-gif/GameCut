@@ -3,6 +3,10 @@ Dead Zone Detector
 Detects simultaneous audio silence and static video frames in gameplay footage.
 Uses ffmpeg for frame/audio extraction, librosa for audio analysis, and
 opencv-python for frame comparison.
+
+When `game_audio_path` is supplied (a pre-split full-spectrum WAV produced by
+audio_splitter.split_audio), the internal ffmpeg extraction step is skipped and
+that file is used directly — avoiding a redundant decode pass.
 """
 
 import os
@@ -25,15 +29,20 @@ def detect_dead_zones(
     preset: dict,
     sensitivity: float = 1.0,
     progress_callback=None,
+    game_audio_path: Optional[str] = None,
 ) -> list[dict]:
     """
     Detect dead zones (simultaneous audio silence + static frames).
 
     Args:
-        video_path: Path to input video file.
+        video_path: Path to input video file (used for frame analysis).
         preset: Preset config dict from presets.json.
         sensitivity: Multiplier applied to thresholds (0.5 = more sensitive, 2.0 = less).
         progress_callback: Optional callable(pct: float, label: str) for progress updates.
+        game_audio_path: Optional path to a pre-split full-spectrum WAV file.
+            When provided the internal ffmpeg extraction is skipped entirely and
+            this file is analysed directly (full-spectrum game audio gives more
+            accurate silence detection than a vocal-filtered mix).
 
     Returns:
         List of dicts with keys: start, end, duration, type ("dead_zone"), confidence.
@@ -46,10 +55,16 @@ def detect_dead_zones(
         if progress_callback:
             progress_callback(pct, label)
 
-    progress(0.0, "Extracting audio track")
-    audio_silence_intervals = _detect_audio_silence(
-        video_path, silence_threshold_db, min_duration
-    )
+    if game_audio_path:
+        progress(0.0, "Using pre-split game audio track")
+        audio_silence_intervals = _detect_audio_silence_from_wav(
+            game_audio_path, silence_threshold_db, min_duration
+        )
+    else:
+        progress(0.0, "Extracting audio track")
+        audio_silence_intervals = _detect_audio_silence(
+            video_path, silence_threshold_db, min_duration
+        )
 
     progress(0.4, "Analyzing video frames")
     video_static_intervals = _detect_static_frames(
@@ -69,7 +84,7 @@ def detect_dead_zones(
 def _detect_audio_silence(
     video_path: str, threshold_db: float, min_duration: float
 ) -> list[dict]:
-    """Extract audio with librosa and find silent intervals."""
+    """Extract full-spectrum audio from a video file, then find silent intervals."""
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_audio = tmp.name
 
@@ -85,10 +100,29 @@ def _detect_audio_silence(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        return _detect_audio_silence_from_wav(tmp_audio, threshold_db, min_duration)
+    except Exception as e:
+        logger.warning(f"Audio extraction failed: {e}")
+        return []
+    finally:
+        if os.path.exists(tmp_audio):
+            os.unlink(tmp_audio)
 
-        y, sr = librosa.load(tmp_audio, sr=22050, mono=True)
 
-        # Compute RMS energy in short windows
+def _detect_audio_silence_from_wav(
+    wav_path: str, threshold_db: float, min_duration: float
+) -> list[dict]:
+    """
+    Analyse an already-extracted WAV file for silent intervals.
+
+    Accepts the full-spectrum game audio WAV produced by audio_splitter so that
+    dead zone detection reacts to *game* sounds (explosions, music, UI) rather
+    than the streamer's commentary — which lives in the bandpass-filtered vocals
+    track used by hype detection.
+    """
+    try:
+        y, sr = librosa.load(wav_path, sr=22050, mono=True)
+
         hop_length = 512
         frame_length = 2048
         rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
@@ -102,11 +136,8 @@ def _detect_audio_silence(
 
         return _frames_to_intervals(frame_times, silent_frames, min_duration, "silence")
     except Exception as e:
-        logger.warning(f"Audio analysis failed: {e}")
+        logger.warning(f"Audio silence analysis failed: {e}")
         return []
-    finally:
-        if os.path.exists(tmp_audio):
-            os.unlink(tmp_audio)
 
 
 def _detect_static_frames(

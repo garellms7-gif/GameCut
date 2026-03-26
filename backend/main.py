@@ -17,6 +17,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from modules.audio_splitter import split_audio, VOCALS_LOWCUT_HZ, VOCALS_HIGHCUT_HZ
 from modules.dead_zone import detect_dead_zones
 from modules.hype_moment import detect_hype_moments
 from modules.edl_export import build_edl, to_json, to_csv, to_edl
@@ -138,8 +139,9 @@ async def analyze(
         if duration <= 0:
             raise HTTPException(status_code=422, detail="Could not determine video duration.")
 
-        # Run both detectors
+        # ── Split audio into two tracks in a single ffmpeg pass ───────────
         progress_log: list[str] = []
+        progress_log.append("[split] Splitting audio into game + vocals tracks")
 
         def dz_progress(pct, label):
             progress_log.append(f"[dead_zone {pct:.0%}] {label}")
@@ -147,16 +149,46 @@ async def analyze(
         def hype_progress(pct, label):
             progress_log.append(f"[hype {pct:.0%}] {label}")
 
-        dead_zones = detect_dead_zones(
-            tmp_path, preset,
-            sensitivity=dead_zone_sensitivity,
-            progress_callback=dz_progress,
-        )
-        highlights = detect_hype_moments(
-            tmp_path, preset,
-            sensitivity=hype_sensitivity,
-            progress_callback=hype_progress,
-        )
+        audio_track_meta: dict = {}
+        with split_audio(tmp_path) as tracks:
+            logger.info(
+                "Audio split: game_audio=%s  vocals=%s",
+                tracks.game_audio_path,
+                tracks.vocals_path,
+            )
+            progress_log.append(
+                f"[split] game audio → full spectrum | "
+                f"vocals → {VOCALS_LOWCUT_HZ} Hz – {VOCALS_HIGHCUT_HZ} Hz bandpass"
+            )
+            # Capture metadata before the context manager cleans up the files
+            audio_track_meta = {
+                "game_audio": {
+                    "description": "Full-spectrum audio — used for dead zone detection",
+                    "filter": tracks.game_audio_filter,
+                },
+                "vocals": {
+                    "description": "Bandpass-filtered commentary — used for hype detection",
+                    "filter": tracks.vocals_filter,
+                    "lowcut_hz": VOCALS_LOWCUT_HZ,
+                    "highcut_hz": VOCALS_HIGHCUT_HZ,
+                },
+            }
+
+            # Dead zones use the full-spectrum game audio track
+            dead_zones = detect_dead_zones(
+                tmp_path, preset,
+                sensitivity=dead_zone_sensitivity,
+                progress_callback=dz_progress,
+                game_audio_path=tracks.game_audio_path,
+            )
+
+            # Hype moments use the bandpass-filtered vocals track
+            highlights = detect_hype_moments(
+                tmp_path, preset,
+                sensitivity=hype_sensitivity,
+                progress_callback=hype_progress,
+                vocals_path=tracks.vocals_path,
+            )
 
         edl = build_edl(
             dead_zones=dead_zones,
@@ -171,6 +203,7 @@ async def analyze(
             "filename": file.filename,
             "duration": duration,
             "fps": fps,
+            "audio_tracks": audio_track_meta,
             "dead_zones": dead_zones,
             "highlights": highlights,
             "edl": edl,
