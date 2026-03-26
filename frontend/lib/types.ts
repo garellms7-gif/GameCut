@@ -1,6 +1,6 @@
 export type GamePreset = "fps" | "open_world" | "rpg" | "fighting" | "platformer";
 
-export type SegmentType = "dead_zone" | "highlight" | "keep";
+export type SegmentType = "dead_zone" | "highlight" | "keep" | "struggle_zone";
 
 export interface Segment {
   start: number;
@@ -10,20 +10,32 @@ export interface Segment {
   score: number | null;
 }
 
+export interface StruggleZone {
+  start: number;
+  end: number;
+  duration: number;
+  type: "struggle_zone";
+  action: "MONTAGE_CANDIDATE";
+  dead_zone_count: number;
+}
+
 export interface EdlSummary {
   total_duration: number;
   dead_zone_duration: number;
   highlight_duration: number;
   keep_duration: number;
+  struggle_zone_duration: number;
   dead_zone_count: number;
   highlight_count: number;
   keep_count: number;
+  struggle_zone_count: number;
   cut_savings_pct: number;
   highlight_pct: number;
 }
 
 export interface Edl {
   segments: Segment[];
+  struggle_zones: StruggleZone[];
   summary: EdlSummary;
   source_name: string;
 }
@@ -88,6 +100,7 @@ export interface AnalysisResult {
   fps: number;
   dead_zones: DeadZone[];
   highlights: Highlight[];
+  struggle_zones: StruggleZone[];
   edl: Edl;
   progress_log: string[];
   threshold_adjustments?: Record<string, ThresholdAdjustment>;

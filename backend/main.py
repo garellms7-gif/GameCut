@@ -24,7 +24,7 @@ from modules.corrections import (
     save_correction,
     segment_hash,
 )
-from modules.dead_zone import detect_dead_zones
+from modules.dead_zone import detect_dead_zones, detect_struggle_zones
 from modules.hype_moment import detect_hype_moments
 from modules.edl_export import build_edl, to_json, to_csv, to_edl
 
@@ -199,13 +199,6 @@ async def analyze(
                 vocals_path=tracks.vocals_path,
             )
 
-        edl = build_edl(
-            dead_zones=dead_zones,
-            highlights=highlights,
-            video_duration=duration,
-            source_name=Path(file.filename or "CLIP").stem[:8].upper(),
-        )
-
         # Attach segment_hash to each detected segment so the frontend can
         # send it back as part of a /feedback call.
         for dz in dead_zones:
@@ -217,6 +210,17 @@ async def analyze(
                 game_preset, "highlight", hl.get("composite_score"), hl["duration"]
             )
 
+        # Post-process: group clustered dead zones into struggle zones
+        struggle_zones = detect_struggle_zones(dead_zones)
+
+        edl = build_edl(
+            dead_zones=dead_zones,
+            highlights=highlights,
+            video_duration=duration,
+            source_name=Path(file.filename or "CLIP").stem[:8].upper(),
+            struggle_zones=struggle_zones,
+        )
+
         response_data = {
             "preset": game_preset,
             "preset_name": preset["name"],
@@ -227,6 +231,7 @@ async def analyze(
             "threshold_adjustments": threshold_adjustments,
             "dead_zones": dead_zones,
             "highlights": highlights,
+            "struggle_zones": struggle_zones,
             "edl": edl,
             "progress_log": progress_log,
         }

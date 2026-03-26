@@ -16,16 +16,22 @@ def build_edl(
     highlights: list[dict],
     video_duration: float,
     source_name: str = "CLIP_001",
+    struggle_zones: list[dict] | None = None,
 ) -> dict:
     """
-    Merge dead zones and highlights into a unified EDL.
+    Merge dead zones, highlights, and struggle zones into a unified EDL.
 
     Segments that are neither dead zones nor highlights are labelled 'keep'.
     Segments that are both highlights and overlap a dead zone give priority to highlight.
 
+    Struggle zones are stored as a separate top-level list and do NOT replace
+    individual dead zone segments in the flat timeline — they are an annotation
+    layer that editors can use to identify montage-candidate windows.
+
     Returns a dict with keys:
-        segments: list of segment dicts (start, end, duration, type, score)
-        summary: overall stats
+        segments:       flat timeline list (dead_zone / highlight / keep)
+        struggle_zones: list of struggle zone windows (may be empty)
+        summary:        overall stats
     """
     # Merge all known intervals
     all_events: list[dict] = []
@@ -82,9 +88,14 @@ def build_edl(
             "score": None,
         })
 
-    summary = _build_summary(segments, video_duration)
+    summary = _build_summary(segments, video_duration, struggle_zones or [])
 
-    return {"segments": segments, "summary": summary, "source_name": source_name}
+    return {
+        "segments": segments,
+        "struggle_zones": struggle_zones or [],
+        "summary": summary,
+        "source_name": source_name,
+    }
 
 
 def _resolve_overlaps(events: list[dict]) -> list[dict]:
@@ -122,19 +133,26 @@ def _resolve_overlaps(events: list[dict]) -> list[dict]:
     return merged
 
 
-def _build_summary(segments: list[dict], total_duration: float) -> dict:
+def _build_summary(
+    segments: list[dict],
+    total_duration: float,
+    struggle_zones: list[dict],
+) -> dict:
     dead_duration = sum(s["duration"] for s in segments if s["type"] == "dead_zone")
     highlight_duration = sum(s["duration"] for s in segments if s["type"] == "highlight")
     keep_duration = sum(s["duration"] for s in segments if s["type"] == "keep")
+    struggle_duration = sum(sz["duration"] for sz in struggle_zones)
 
     return {
         "total_duration": round(total_duration, 3),
         "dead_zone_duration": round(dead_duration, 3),
         "highlight_duration": round(highlight_duration, 3),
         "keep_duration": round(keep_duration, 3),
+        "struggle_zone_duration": round(struggle_duration, 3),
         "dead_zone_count": sum(1 for s in segments if s["type"] == "dead_zone"),
         "highlight_count": sum(1 for s in segments if s["type"] == "highlight"),
         "keep_count": sum(1 for s in segments if s["type"] == "keep"),
+        "struggle_zone_count": len(struggle_zones),
         "cut_savings_pct": round(dead_duration / total_duration * 100, 1) if total_duration > 0 else 0,
         "highlight_pct": round(highlight_duration / total_duration * 100, 1) if total_duration > 0 else 0,
     }
@@ -148,9 +166,13 @@ def to_json(edl: dict) -> str:
 
 def to_csv(edl: dict) -> str:
     output = io.StringIO()
-    fieldnames = ["index", "start", "end", "duration", "type", "score"]
+    fieldnames = ["index", "start", "end", "duration", "type", "score", "action"]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
+
+    # Build a lookup: segment start → struggle zone membership
+    struggle_starts = {sz["start"]: sz for sz in edl.get("struggle_zones", [])}
+
     for i, seg in enumerate(edl["segments"], 1):
         writer.writerow({
             "index": i,
@@ -159,14 +181,29 @@ def to_csv(edl: dict) -> str:
             "duration": seg["duration"],
             "type": seg["type"],
             "score": seg.get("score") or "",
+            "action": seg.get("action") or "",
         })
+
+    # Append struggle zone rows after the flat segment list
+    for i, sz in enumerate(edl.get("struggle_zones", []), 1):
+        writer.writerow({
+            "index": f"SZ{i}",
+            "start": sz["start"],
+            "end": sz["end"],
+            "duration": sz["duration"],
+            "type": sz["type"],
+            "score": "",
+            "action": sz.get("action", "MONTAGE_CANDIDATE"),
+        })
+
     return output.getvalue()
 
 
 def to_edl(edl: dict, fps: float = 30.0) -> str:
     """
     Generate a DaVinci Resolve / CMX 3600-compatible EDL.
-    Only 'keep' and 'highlight' segments are included (dead_zones are omitted).
+    Dead zones are omitted from the edit; highlights and keeps are included.
+    Struggle zones are appended as comment blocks with MONTAGE_CANDIDATE markers.
     """
     source = edl.get("source_name", "CLIP_001").upper().replace(" ", "_")[:8]
     lines = [
@@ -178,15 +215,12 @@ def to_edl(edl: dict, fps: float = 30.0) -> str:
     edit_number = 1
     for seg in edl["segments"]:
         if seg["type"] == "dead_zone":
-            continue  # Omit dead zones from the final edit
+            continue
 
-        record_start = seg["start"]
-        record_end = seg["end"]
-
-        src_tc_in = _seconds_to_timecode(seg["start"], fps)
-        src_tc_out = _seconds_to_timecode(seg["end"], fps)
-        rec_tc_in = _seconds_to_timecode(record_start, fps)
-        rec_tc_out = _seconds_to_timecode(record_end, fps)
+        src_tc_in  = _seconds_to_timecode(seg["start"], fps)
+        src_tc_out = _seconds_to_timecode(seg["end"],   fps)
+        rec_tc_in  = _seconds_to_timecode(seg["start"], fps)
+        rec_tc_out = _seconds_to_timecode(seg["end"],   fps)
 
         lines.append(
             f"{edit_number:03d}  {source:<8} V     C        "
@@ -197,6 +231,19 @@ def to_edl(edl: dict, fps: float = 30.0) -> str:
 
         lines.append("")
         edit_number += 1
+
+    # Append struggle zone annotations
+    struggle_zones = edl.get("struggle_zones", [])
+    if struggle_zones:
+        lines.append("* ── STRUGGLE ZONES (MONTAGE CANDIDATES) ──────────────────")
+        for i, sz in enumerate(struggle_zones, 1):
+            tc_in  = _seconds_to_timecode(sz["start"], fps)
+            tc_out = _seconds_to_timecode(sz["end"],   fps)
+            lines.append(
+                f"* SZ{i:02d} MONTAGE_CANDIDATE  {tc_in} - {tc_out}  "
+                f"({sz['dead_zone_count']} dead zones, {sz['duration']:.1f}s)"
+            )
+        lines.append("")
 
     return "\n".join(lines)
 

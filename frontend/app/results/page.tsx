@@ -8,13 +8,14 @@ import type {
   AnalysisResult,
   FeedbackVote,
   Highlight,
+  StruggleZone,
   ThresholdAdjustment,
 } from "@/lib/types";
 
 export default function ResultsPage() {
   const router = useRouter();
   const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [activeTab, setActiveTab] = useState<"timeline" | "highlights" | "cuts">("timeline");
+  const [activeTab, setActiveTab] = useState<"timeline" | "highlights" | "cuts" | "struggle">("timeline");
   // Map of segmentKey → "up" | "down" to track which segments have been voted on
   const [votes, setVotes] = useState<Map<string, FeedbackVote>>(new Map());
   // Toast message
@@ -73,9 +74,10 @@ export default function ResultsPage() {
     );
   }
 
-  const { edl, highlights, dead_zones, duration, filename, preset_name, threshold_adjustments } = result;
+  const { edl, highlights, dead_zones, struggle_zones, duration, filename, preset_name, threshold_adjustments } = result;
   const { summary } = edl;
   const hasAdjustments = threshold_adjustments && Object.keys(threshold_adjustments).length > 0;
+  const hasStruggleZones = (struggle_zones ?? []).length > 0;
 
   const handleExport = (format: "json" | "csv" | "edl") => {
     let content = "";
@@ -153,11 +155,19 @@ export default function ResultsPage() {
       )}
 
       {/* Summary stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
+      <div className={`grid gap-3 mb-8 ${hasStruggleZones ? "grid-cols-2 sm:grid-cols-5" : "grid-cols-2 sm:grid-cols-4"}`}>
         <StatCard label="Cut savings" value={`${summary.cut_savings_pct}%`} sub={`${summary.dead_zone_count} dead zones`} color="text-red-400" />
         <StatCard label="Highlights" value={`${summary.highlight_pct}%`} sub={`${summary.highlight_count} moments`} color="text-green-400" />
         <StatCard label="Dead time" value={`${summary.dead_zone_duration.toFixed(0)}s`} sub="can be cut" color="text-red-300" />
         <StatCard label="Keep time" value={`${summary.keep_duration.toFixed(0)}s`} sub="neutral content" color="text-yellow-400" />
+        {hasStruggleZones && (
+          <StatCard
+            label="Struggle zones"
+            value={String(summary.struggle_zone_count ?? (struggle_zones ?? []).length)}
+            sub={`${(summary.struggle_zone_duration ?? 0).toFixed(0)}s montage`}
+            color="text-orange-400"
+          />
+        )}
       </div>
 
       {/* Timeline */}
@@ -165,7 +175,11 @@ export default function ResultsPage() {
         <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-4">
           Visual Timeline
         </h2>
-        <Timeline segments={edl.segments} totalDuration={duration} />
+        <Timeline
+          segments={edl.segments}
+          totalDuration={duration}
+          struggleZones={struggle_zones ?? []}
+        />
       </div>
 
       {/* Feedback hint */}
@@ -174,11 +188,11 @@ export default function ResultsPage() {
       </p>
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-4 bg-white/5 rounded-lg p-1 w-fit">
-        {(["timeline", "highlights", "cuts"] as const).map((tab) => (
+      <div className="flex flex-wrap gap-1 mb-4 bg-white/5 rounded-lg p-1 w-fit">
+        {(["timeline", "highlights", "cuts", ...(hasStruggleZones ? ["struggle"] : [])] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => setActiveTab(tab as typeof activeTab)}
             className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all
               ${activeTab === tab ? "bg-white/10 text-white" : "text-white/40 hover:text-white/70"}`}
           >
@@ -186,6 +200,8 @@ export default function ResultsPage() {
               ? "All Segments"
               : tab === "highlights"
               ? `Highlights (${highlights.length})`
+              : tab === "struggle"
+              ? `Struggle Zones (${(struggle_zones ?? []).length})`
               : `Dead Zones (${dead_zones.length})`}
           </button>
         ))}
@@ -241,6 +257,11 @@ export default function ResultsPage() {
                 )
               }
             />
+          ))}
+
+        {activeTab === "struggle" &&
+          (struggle_zones ?? []).map((sz, i) => (
+            <StruggleZoneRow key={i} sz={sz} index={i + 1} />
           ))}
       </div>
 
@@ -405,6 +426,23 @@ function ScoreBar({ label, value, color }: { label: string; value: number; color
       <div className="bg-white/10 rounded-full h-1">
         <div className="h-1 rounded-full" style={{ width: `${value * 100}%`, backgroundColor: color }} />
       </div>
+    </div>
+  );
+}
+
+function StruggleZoneRow({ sz, index }: { sz: StruggleZone; index: number }) {
+  return (
+    <div className="flex items-center gap-3 p-3 rounded-lg border border-orange-500/30 bg-orange-500/5 text-sm">
+      <span className="text-white/20 w-6 text-right text-xs">{index}</span>
+      <span className="font-semibold text-xs w-20 text-orange-400">STRUGGLE</span>
+      <span className="font-mono text-white/70">{formatTime(sz.start)}</span>
+      <span className="text-white/20">→</span>
+      <span className="font-mono text-white/70">{formatTime(sz.end)}</span>
+      <span className="ml-auto text-white/30 text-xs">{sz.duration.toFixed(1)}s</span>
+      <span className="text-xs text-orange-400/70">{sz.dead_zone_count} dead zones</span>
+      <span className="text-xs px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300 font-mono">
+        MONTAGE
+      </span>
     </div>
   );
 }

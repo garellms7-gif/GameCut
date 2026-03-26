@@ -81,6 +81,100 @@ def detect_dead_zones(
     return filtered
 
 
+STRUGGLE_WINDOW_SEC = 600   # 10-minute sliding window
+STRUGGLE_MIN_COUNT  = 3     # minimum dead zones to form a struggle zone
+
+
+def detect_struggle_zones(
+    dead_zones: list[dict],
+    window_sec: float = STRUGGLE_WINDOW_SEC,
+    min_count: int = STRUGGLE_MIN_COUNT,
+) -> list[dict]:
+    """
+    Post-processing pass over detected dead zones.
+
+    A *struggle zone* is declared when ``min_count`` or more dead zones have
+    their start times within any ``window_sec``-wide sliding window.  The
+    resulting zone spans from the earliest dead zone's start to the latest
+    dead zone's end inside that cluster.
+
+    Overlapping struggle windows are merged into one zone so the output list
+    is non-overlapping and sorted by start time.
+
+    Args:
+        dead_zones: Output of detect_dead_zones(), sorted by start.
+        window_sec: Width of the sliding detection window (default: 600 s = 10 min).
+        min_count: Minimum dead zones in the window to declare a struggle zone.
+
+    Returns:
+        List of dicts with keys:
+            start, end, duration, type ("struggle_zone"),
+            action ("MONTAGE_CANDIDATE"), dead_zone_count, dead_zone_indices
+    """
+    if len(dead_zones) < min_count:
+        return []
+
+    # Sorted by start (caller should already have done this, but be defensive)
+    dzs = sorted(dead_zones, key=lambda x: x["start"])
+
+    raw_zones: list[dict] = []
+
+    for i, anchor in enumerate(dzs):
+        window_end = anchor["start"] + window_sec
+        # Collect all dead zones whose start falls within the window
+        cluster_indices = [
+            j for j, dz in enumerate(dzs)
+            if anchor["start"] <= dz["start"] <= window_end
+        ]
+        if len(cluster_indices) >= min_count:
+            zone_start = dzs[cluster_indices[0]]["start"]
+            zone_end   = max(dzs[j]["end"] for j in cluster_indices)
+            raw_zones.append({
+                "start": zone_start,
+                "end":   zone_end,
+                "dead_zone_count": len(cluster_indices),
+                "dead_zone_indices": cluster_indices,
+            })
+
+    if not raw_zones:
+        return []
+
+    # Merge overlapping raw zones
+    raw_zones.sort(key=lambda x: x["start"])
+    merged: list[dict] = []
+    cur = raw_zones[0].copy()
+
+    for nxt in raw_zones[1:]:
+        if nxt["start"] <= cur["end"]:
+            cur["end"]   = max(cur["end"], nxt["end"])
+            cur["dead_zone_count"] = max(cur["dead_zone_count"], nxt["dead_zone_count"])
+            # Union of participating indices
+            seen = set(cur["dead_zone_indices"]) | set(nxt["dead_zone_indices"])
+            cur["dead_zone_indices"] = sorted(seen)
+        else:
+            merged.append(cur)
+            cur = nxt.copy()
+    merged.append(cur)
+
+    result = []
+    for zone in merged:
+        dur = round(zone["end"] - zone["start"], 3)
+        result.append({
+            "start":             round(zone["start"], 3),
+            "end":               round(zone["end"], 3),
+            "duration":          dur,
+            "type":              "struggle_zone",
+            "action":            "MONTAGE_CANDIDATE",
+            "dead_zone_count":   zone["dead_zone_count"],
+        })
+
+    logger.info(
+        "Struggle zone detection: %d zone(s) from %d dead zones (window=%.0fs, min=%d)",
+        len(result), len(dzs), window_sec, min_count,
+    )
+    return result
+
+
 def _detect_audio_silence(
     video_path: str, threshold_db: float, min_duration: float
 ) -> list[dict]:
