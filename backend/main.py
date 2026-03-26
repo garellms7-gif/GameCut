@@ -27,7 +27,7 @@ from modules.corrections import (
 )
 from modules.dead_zone import detect_dead_zones, detect_struggle_zones
 from modules.hype_moment import detect_hype_moments
-from modules.edl_export import build_edl, to_json, to_csv, to_edl, to_fcpxml
+from modules.edl_export import build_edl, to_json, to_csv, to_edl, to_fcpxml, to_capcut
 from modules.preset_detector import detect_preset
 
 logging.basicConfig(level=logging.INFO)
@@ -306,12 +306,19 @@ async def analyze(
                 media_type="application/xml",
                 headers={"Content-Disposition": 'attachment; filename="gamecut_timeline.fcpxml"'},
             )
+        elif export_format == "capcut":
+            return PlainTextResponse(
+                to_capcut(edl, fps=fps, source_filename=file.filename or ""),
+                media_type="application/json",
+                headers={"Content-Disposition": 'attachment; filename="draft_content.json"'},
+            )
         elif export_format == "all":
             response_data["exports"] = {
                 "json": json.loads(to_json(edl)),
                 "csv": to_csv(edl),
                 "edl": to_edl(edl, fps=fps),
                 "fcpxml": to_fcpxml(edl, fps=fps, source_filename=file.filename or "source.mp4"),
+                "capcut": to_capcut(edl, fps=fps, source_filename=file.filename or ""),
             }
 
         return JSONResponse(content=response_data)

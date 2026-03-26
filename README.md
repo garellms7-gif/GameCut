@@ -187,6 +187,76 @@ Merges dead zones and highlights into a flat timeline:
 
 ---
 
+## CapCut Export
+
+The **Export for CapCut** button downloads a `draft_content.json` file containing
+colored text markers placed at every detected HIGHLIGHT and CUT (dead zone)
+timestamp on your video's timeline.
+
+| Marker color | Meaning |
+|---|---|
+| Green `#00C853` | Highlight moment — keep and feature |
+| Red `#FF3D3D` | Dead zone — consider cutting |
+| Orange `#FF8C00` | Struggle zone — montage candidate |
+
+Each marker is visible for **1.5 seconds** and labelled with the segment type
+and timestamp (e.g. `▶ HIGHLIGHT  01:23`).
+
+### How to use
+
+The exported `draft_content.json` creates a **standalone CapCut project** that
+contains only the marker track.  Open it in CapCut, then use it as a reference
+while you edit your main project.
+
+### Project folder locations
+
+CapCut stores projects inside a folder named with a unique project ID.
+Place `draft_content.json` inside a **new** project folder you create manually,
+or replace the `draft_content.json` of an existing empty CapCut project.
+
+**Windows**
+
+```
+%USERPROFILE%\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft\
+```
+
+Full example path:
+
+```
+C:\Users\<YourName>\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft\<project-id>\draft_content.json
+```
+
+Steps:
+1. Open File Explorer and paste `%USERPROFILE%\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft\` into the address bar.
+2. Create a new folder (any name — CapCut uses the folder name as the project name initially).
+3. Copy the downloaded `draft_content.json` into that folder.
+4. Open CapCut — the project will appear in **My Projects**.
+
+**macOS**
+
+```
+~/Movies/CapCut/User Data/Projects/com.lveditor.draft/
+```
+
+Full example path:
+
+```
+/Users/<YourName>/Movies/CapCut/User Data/Projects/com.lveditor.draft/<project-id>/draft_content.json
+```
+
+Steps:
+1. Open Finder, press `⌘ Shift G`, and enter `~/Movies/CapCut/User Data/Projects/com.lveditor.draft/`.
+2. Create a new folder for the project.
+3. Copy the downloaded `draft_content.json` into that folder.
+4. Open CapCut — the project will appear in **My Projects**.
+
+> **Note:** CapCut's internal format evolves between app versions.  The export
+> targets CapCut **5.9** and later (desktop).  If markers do not appear, ensure
+> you are running an up-to-date version of CapCut and that the `draft_content.json`
+> is the only file in the project folder before opening it.
+
+---
+
 ## Troubleshooting
 
 **`librosa` install fails on Apple Silicon**

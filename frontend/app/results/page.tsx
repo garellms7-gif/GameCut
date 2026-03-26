@@ -83,10 +83,12 @@ export default function ResultsPage() {
   const hasAdjustments = threshold_adjustments && Object.keys(threshold_adjustments).length > 0;
   const hasStruggleZones = (struggle_zones ?? []).length > 0;
 
-  const handleExport = (format: "json" | "csv" | "edl" | "fcpxml") => {
+  const handleExport = (format: "json" | "csv" | "edl" | "fcpxml" | "capcut") => {
     let content = "";
     let mime = "text/plain";
-    const exports = (result as unknown as { exports?: { edl?: string; fcpxml?: string } }).exports;
+    const exports = (result as unknown as {
+      exports?: { edl?: string; fcpxml?: string; capcut?: string };
+    }).exports;
 
     if (format === "json") {
       content = JSON.stringify(result.edl, null, 2);
@@ -103,15 +105,21 @@ export default function ResultsPage() {
     } else if (format === "fcpxml") {
       content = exports?.fcpxml ?? "FCPXML export not available. Re-analyze with export_format=all.";
       mime = "application/xml";
+    } else if (format === "capcut") {
+      content = exports?.capcut ?? "CapCut export not available. Re-analyze with export_format=all.";
+      mime = "application/json";
     }
+
+    const downloadName =
+      format === "fcpxml" ? "gamecut_timeline.fcpxml" :
+      format === "capcut" ? "draft_content.json" :
+      `gamecut_${filename?.replace(/\.[^.]+$/, "") ?? "export"}.${format}`;
 
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = format === "fcpxml"
-      ? "gamecut_timeline.fcpxml"
-      : `gamecut_${filename?.replace(/\.[^.]+$/, "") ?? "export"}.${format}`;
+    a.download = downloadName;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -310,6 +318,7 @@ export default function ResultsPage() {
           <ExportButton onClick={() => handleExport("csv")} label="CSV" icon="📊" />
           <ExportButton onClick={() => handleExport("edl")} label="DaVinci EDL" icon="🎬" />
           <ExportButton onClick={() => handleExport("fcpxml")} label="FCPXML (Resolve)" icon="🎞️" />
+          <ExportButton onClick={() => handleExport("capcut")} label="Export for CapCut" icon="✂️" />
         </div>
       </div>
 

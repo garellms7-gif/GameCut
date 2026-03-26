@@ -8,6 +8,8 @@ import csv
 import io
 import json
 import math
+import time
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Union
@@ -413,3 +415,365 @@ def to_fcpxml(
         + xml_body
         + "\n"
     )
+
+
+# ─── CapCut draft_content.json export ──────────────────────────────────────────
+
+_CAPCUT_VERSION = "5.9.0"
+_CAPCUT_NEW_VERSION = "119.0.0"
+
+# Marker config: type → (hex color, [R,G,B] floats, y-translation, label prefix)
+# y-translation uses CapCut's normalised screen space (-0.5 top → +0.5 bottom).
+_MARKER_STYLE: dict[str, tuple[str, list[float], float, str]] = {
+    "highlight":    ("#00C853", [0.0,  0.784, 0.325], -0.35, "▶ HIGHLIGHT"),
+    "dead_zone":    ("#FF3D3D", [1.0,  0.239, 0.239],  0.35, "✕ CUT"),
+    "struggle_zone":("#FF8C00", [1.0,  0.549, 0.0],    0.0,  "⚡ STRUGGLE"),
+}
+# Marker visibility: 1.5 seconds in microseconds
+_MARKER_DUR_US = 1_500_000
+
+
+def _uid() -> str:
+    """Return an uppercase UUID string as used by CapCut."""
+    return str(uuid.uuid4()).upper()
+
+
+def _capcut_text_content(label: str, color_rgb: list[float]) -> str:
+    """
+    Encode a text label into CapCut's inner JSON-string format.
+    The `content` field of a text material is itself a JSON-encoded string.
+    """
+    inner = {
+        "styles": [{
+            "fill": {"alpha": 1, "color": color_rgb},
+            "strokes": [],
+            "range": [0, len(label)],
+            "useLetterColor": False,
+        }],
+        "text": label,
+    }
+    return json.dumps(inner, ensure_ascii=False, separators=(",", ":"))
+
+
+def _capcut_text_material(
+    mat_id: str,
+    label: str,
+    hex_color: str,
+    color_rgb: list[float],
+) -> dict:
+    """Build a CapCut text material object."""
+    return {
+        "add_type": 0,
+        "alignment": 1,
+        "background_alpha": 1.0,
+        "background_color": "",
+        "background_height": 0.14,
+        "background_horizontal_offset": 0.0,
+        "background_round_radius": 0.0,
+        "background_style": 0,
+        "background_vertical_offset": 0.0,
+        "background_width": 0.82,
+        "base_content": "",
+        "bold_width": 0.0,
+        "border_alpha": 1.0,
+        "border_color": "",
+        "border_width": 0.08,
+        "content": _capcut_text_content(label, color_rgb),
+        "fixed_height": -1.0,
+        "fixed_width": -1.0,
+        "font_category_id": "",
+        "font_category_name": "",
+        "font_id": "",
+        "font_name": "",
+        "font_path": "",
+        "font_resource_id": "",
+        "font_size": 8.0,
+        "font_source_platform": 0,
+        "font_title": "none",
+        "font_url": "",
+        "fonts": [],
+        "force_apply_line_max_width": False,
+        "global_alpha": 1.0,
+        "group_id": "",
+        "has_shadow": True,
+        "id": mat_id,
+        "initial_scale": 1.0,
+        "inner_padding": -1.0,
+        "is_rich_text": False,
+        "italic": False,
+        "italic_degree": 0,
+        "ktv_color": "",
+        "language": "",
+        "layer_weight": 1,
+        "letter_spacing": 0.0,
+        "line_feed": 1,
+        "line_max_width": 0.82,
+        "line_spacing": 0.02,
+        "multi_language_current": "none",
+        "name": "",
+        "original_size": [],
+        "preset_id": "",
+        "recognize_task_id": "",
+        "recognize_type": 0,
+        "relevance_segment": [],
+        "shadow_alpha": 0.9,
+        "shadow_angle": -45.0,
+        "shadow_color": "",
+        "shadow_distance": 8.0,
+        "shadow_point": {"x": 0.6363961030678928, "y": -0.6363961030678928},
+        "shadow_smoothing": 1.0,
+        "shape_clip_type": "none",
+        "style_name": "",
+        "sub_type": "none",
+        "text_alpha": 1.0,
+        "text_color": hex_color,
+        "text_curve": None,
+        "text_preset_resource_id": "",
+        "text_size": 30,
+        "text_to_audio_ids": [],
+        "tts_auto_update": False,
+        "type": "text",
+        "typesetting": "horizontal",
+        "underline": False,
+        "underline_offset": 0.22,
+        "underline_width": 0.05,
+        "use_effect_default_color": False,
+        "words": {"end_time": [], "start_time": [], "text": []},
+    }
+
+
+def _capcut_text_segment(
+    seg_id: str,
+    mat_id: str,
+    start_us: int,
+    dur_us: int,
+    render_index: int,
+    y_translation: float,
+) -> dict:
+    """Build a CapCut track-segment object referencing a text material."""
+    return {
+        "caption_info": None,
+        "cartoon": False,
+        "clip": {
+            "alpha": 1.0,
+            "flip": {"horizontal": False, "vertical": False},
+            "rotation": 0.0,
+            "scale": {"x": 1.0, "y": 1.0},
+            "translation": {"x": 0.0, "y": y_translation},
+        },
+        "common_keyframes": [],
+        "enable_adjust": True,
+        "enable_color_correct_adjust": False,
+        "enable_color_curves": True,
+        "enable_lut": True,
+        "enable_smart_color_adjust": False,
+        "extra_material_refs": [],
+        "group_id": "",
+        "hdr_settings": None,
+        "id": seg_id,
+        "intensifies_audio": False,
+        "is_placeholder": False,
+        "is_tone_modify": False,
+        "keyframe_refs": [],
+        "last_nonzero_volume": 1.0,
+        "material_id": mat_id,
+        "render_index": render_index,
+        "responsive_layout": {
+            "enable": False,
+            "horizontal_pos_layout": 0,
+            "size_layout": 0,
+            "target_follow": "",
+            "vertical_pos_layout": 0,
+        },
+        "reverse": False,
+        "source_timerange": {"duration": dur_us, "start": 0},
+        "speed": 1.0,
+        "target_timerange": {"duration": dur_us, "start": start_us},
+        "template_id": "",
+        "template_scene": "default",
+        "track_attribute": 0,
+        "track_render_index": 0,
+        "uniform_scale": {"on": True, "value": 1.0},
+        "visible": True,
+        "volume": 1.0,
+    }
+
+
+def to_capcut(edl: dict, fps: float = 30.0, source_filename: str = "") -> str:
+    """
+    Generate a CapCut-compatible ``draft_content.json`` markers file.
+
+    Places colored text markers on the timeline at every HIGHLIGHT and CUT
+    (dead_zone) timestamp, plus STRUGGLE_ZONE annotations:
+
+      HIGHLIGHT    → green  (#00C853), top of frame, "▶ HIGHLIGHT"
+      dead_zone    → red    (#FF3D3D), bottom of frame, "✕ CUT"
+      struggle_zone→ orange (#FF8C00), centre of frame, "⚡ STRUGGLE"
+
+    Each marker is displayed for 1.5 seconds.  Times are stored in
+    **microseconds** as required by CapCut's internal format.
+
+    The returned string is a complete JSON document.  Save it as
+    ``draft_content.json`` and place it in your CapCut project folder
+    (see README for exact paths on Windows / macOS).
+    """
+    total_us = max(1, int(edl["summary"]["total_duration"] * 1_000_000))
+    now_ts   = int(time.time())
+
+    text_materials: list[dict] = []
+    track_segments: list[dict] = []
+    render_idx = 0
+
+    # ── Flat-timeline markers (highlights + dead zones) ────────────────────
+    for seg in edl["segments"]:
+        seg_type = seg["type"]
+        if seg_type not in _MARKER_STYLE:
+            continue
+
+        hex_color, color_rgb, y_trans, prefix = _MARKER_STYLE[seg_type]
+
+        score = seg.get("score")
+        if score is not None and seg_type == "highlight":
+            label = f"{prefix}  {score:.2f}"
+        else:
+            label = f"{prefix}  {_fmt_ms(seg['start'])}"
+
+        mat_id  = _uid()
+        seg_id  = _uid()
+        start_us = int(seg["start"] * 1_000_000)
+        dur_us   = min(_MARKER_DUR_US, total_us - start_us)
+        if dur_us <= 0:
+            continue
+
+        text_materials.append(
+            _capcut_text_material(mat_id, label, hex_color, color_rgb)
+        )
+        track_segments.append(
+            _capcut_text_segment(seg_id, mat_id, start_us, dur_us, render_idx, y_trans)
+        )
+        render_idx += 1
+
+    # ── Struggle zone markers ──────────────────────────────────────────────
+    hex_color, color_rgb, y_trans, prefix = _MARKER_STYLE["struggle_zone"]
+    for sz in edl.get("struggle_zones", []):
+        dz_count = sz.get("dead_zone_count", 0)
+        label    = f"{prefix}  ×{dz_count}  {_fmt_ms(sz['start'])}"
+
+        mat_id   = _uid()
+        seg_id   = _uid()
+        start_us = int(sz["start"] * 1_000_000)
+        dur_us   = min(_MARKER_DUR_US, total_us - start_us)
+        if dur_us <= 0:
+            continue
+
+        text_materials.append(
+            _capcut_text_material(mat_id, label, hex_color, color_rgb)
+        )
+        track_segments.append(
+            _capcut_text_segment(seg_id, mat_id, start_us, dur_us, render_idx, y_trans)
+        )
+        render_idx += 1
+
+    # ── Assemble draft_content ─────────────────────────────────────────────
+    platform_info = {
+        "app_version": _CAPCUT_VERSION,
+        "device_id": "",
+        "hard_disk_id": "",
+        "mac_address": "",
+        "os": "windows",
+        "os_version": "",
+    }
+
+    draft: dict = {
+        "canvas_config": {"height": 1080, "ratio": "original", "width": 1920},
+        "color_space": 0,
+        "config": {
+            "adjust_max_index": 1,
+            "attachment_info": [],
+            "combination_max_index": 1,
+            "export_range": None,
+            "extract_audio_last_index": 1,
+            "lyrics_recognition_id": "",
+            "lyrics_sync": False,
+            "maintrack_adsorb": True,
+            "material_save_mode": 0,
+            "multi_language_current": "none",
+            "multi_language_list": [],
+            "multi_language_main": "none",
+            "multi_language_mode": "none",
+            "original_sound_last_index": 1,
+            "record_audio_last_index": 1,
+            "sticker_max_index": 1,
+            "subtitle_recognition_id": "",
+            "subtitle_sync": True,
+            "subtitle_taskinfo": [],
+            "system_font_list": [],
+            "video_mute": False,
+            "zoom_info_params": None,
+        },
+        "cover": "",
+        "create_time": now_ts,
+        "duration": total_us,
+        "extra_info": source_filename,
+        "fps": round(fps, 6),
+        "free_render_index_mode_on": False,
+        "group_container": None,
+        "id": _uid(),
+        "keyframe_graph_list": [],
+        "keyframes": {
+            "adjusts": [], "audios": [], "filters": [],
+            "handwrites": [], "texts": [], "videos": [],
+        },
+        "last_modified_platform": platform_info,
+        "lyrics_recognition_id": "",
+        "lyrics_taskinfo": [],
+        "materials": {
+            "audios": [], "beats": [], "canvases": [], "color_curves": [],
+            "digital_humans": [], "drafts": [], "effects": [], "flowers": [],
+            "green_screens": [], "handwrites": [], "hsl": [], "images": [],
+            "log_color_wheels": [], "loudnesses": [], "manual_deformations": [],
+            "masks": [], "material_animations": [], "material_colors": [],
+            "place_holders": [], "plugin_effects": [], "primary_color_wheels": [],
+            "retouch_adjusts": [], "retouch_face_beauties": [],
+            "retouch_filters": [], "retouch_hair_beauties": [],
+            "retouch_teeth_beauties": [], "speeds": [], "stickers": [],
+            "tail_leaders": [], "text_templates": [],
+            "texts": text_materials,
+            "time_marks": [], "transitions": [], "video_effects": [],
+            "video_trackings": [], "videos": [], "vocal_beauties": [],
+            "vocaloids": [],
+        },
+        "mutable_config": None,
+        "name": "GameCut Markers",
+        "new_version": _CAPCUT_NEW_VERSION,
+        "platform": platform_info,
+        "relationships": [],
+        "render_index_track_mode_on": False,
+        "retouch_cover": None,
+        "source_info": {"platform": "", "task_id": "", "task_type": ""},
+        "static_cover_image_path": "",
+        "time_marks": {"in": -1, "out": -1, "transition_time": 0},
+        "tracks": [
+            {
+                "attribute": 0,
+                "flag": 0,
+                "id": _uid(),
+                "is_default_name": True,
+                "name": "",
+                "segments": track_segments,
+                "type": "text",
+            }
+        ],
+        "update_time": now_ts,
+        "version": _CAPCUT_VERSION,
+        "video_mute": False,
+    }
+
+    return json.dumps(draft, ensure_ascii=False, indent=2)
+
+
+def _fmt_ms(seconds: float) -> str:
+    """Format seconds as MM:SS for use in short marker labels."""
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    return f"{m:02d}:{s:02d}"
