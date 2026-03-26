@@ -4,13 +4,18 @@ Single /analyze endpoint that accepts a video file and game_preset,
 runs dead zone + hype moment detection, then returns a merged EDL.
 """
 
+import asyncio
+import functools
+import glob as _glob
 import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -111,6 +116,128 @@ def _get_video_dimensions(path: str) -> tuple[int, int]:
         return 1920, 1080
 
 
+# ── Chunking constants & job-progress store ────────────────────────────────────
+
+CHUNK_DURATION_SEC = 900  # 15 minutes per chunk
+
+_job_progress: dict[str, dict] = {}
+_job_lock = threading.Lock()
+
+
+def _init_job(job_id: str, total_chunks: int) -> None:
+    with _job_lock:
+        _job_progress[job_id] = {
+            "total_chunks": total_chunks,
+            "completed_chunks": 0,
+            "chunk_labels": ["Queued"] * total_chunks,
+            "status": "analyzing",
+        }
+
+
+def _update_chunk_label(job_id: str, chunk_idx: int, label: str) -> None:
+    with _job_lock:
+        if job_id in _job_progress:
+            _job_progress[job_id]["chunk_labels"][chunk_idx] = label
+
+
+def _complete_chunk(job_id: str, chunk_idx: int) -> None:
+    with _job_lock:
+        if job_id in _job_progress:
+            _job_progress[job_id]["completed_chunks"] += 1
+            _job_progress[job_id]["chunk_labels"][chunk_idx] = "Done"
+
+
+def _finish_job(job_id: str) -> None:
+    with _job_lock:
+        if job_id in _job_progress:
+            _job_progress[job_id]["status"] = "done"
+
+
+def _split_into_chunks(video_path: str) -> tuple[list[tuple[str, float]], Optional[str]]:
+    """Split video into ~15-min chunks using the ffmpeg segment muxer.
+
+    Returns ([(chunk_path, start_offset_seconds), ...], tmp_dir).
+    tmp_dir is None when splitting failed and the original path is returned.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="gamecut_chunks_")
+    pattern = os.path.join(tmp_dir, "chunk_%03d.mp4")
+
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-f", "segment",
+            "-segment_time", str(CHUNK_DURATION_SEC),
+            "-reset_timestamps", "1",
+            "-c", "copy",
+            pattern,
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+    chunk_files = sorted(_glob.glob(os.path.join(tmp_dir, "chunk_*.mp4")))
+
+    if not chunk_files:
+        logger.warning(
+            "ffmpeg segment muxer produced no chunks: %s",
+            result.stderr.decode()[-300:],
+        )
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return [(video_path, 0.0)], None
+
+    # Compute start offsets from cumulative chunk durations
+    chunks: list[tuple[str, float]] = []
+    offset = 0.0
+    for chunk_path in chunk_files:
+        chunks.append((chunk_path, offset))
+        offset += _get_video_duration(chunk_path)
+
+    return chunks, tmp_dir
+
+
+def _process_chunk(
+    chunk_path: str,
+    chunk_offset: float,
+    chunk_idx: int,
+    job_id: Optional[str],
+    preset: dict,
+    dz_sensitivity: float,
+    hype_sensitivity: float,
+) -> tuple[list[dict], list[dict]]:
+    """Detect dead zones and hype moments in one chunk; adjust timestamps by offset."""
+    total = _job_progress.get(job_id, {}).get("total_chunks", 1) if job_id else 1
+    logger.info("Processing chunk %d/%d (offset=%.1fs)", chunk_idx + 1, total, chunk_offset)
+
+    if job_id:
+        _update_chunk_label(job_id, chunk_idx, f"Analyzing chunk {chunk_idx + 1} of {total}…")
+
+    with split_audio(chunk_path) as tracks:
+        dead_zones = detect_dead_zones(
+            chunk_path, preset,
+            sensitivity=dz_sensitivity,
+            game_audio_path=tracks.game_audio_path,
+        )
+        highlights = detect_hype_moments(
+            chunk_path, preset,
+            sensitivity=hype_sensitivity,
+            vocals_path=tracks.vocals_path,
+        )
+
+    # Shift all timestamps by this chunk's start offset
+    for seg in dead_zones:
+        seg["start"] += chunk_offset
+        seg["end"] += chunk_offset
+    for seg in highlights:
+        seg["start"] += chunk_offset
+        seg["end"] += chunk_offset
+
+    if job_id:
+        _complete_chunk(job_id, chunk_idx)
+
+    return dead_zones, highlights
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -170,6 +297,7 @@ async def analyze(
     dead_zone_sensitivity: float = Form(1.0, description="Dead zone sensitivity multiplier (0.5–2.0)"),
     hype_sensitivity: float = Form(1.0, description="Hype detection sensitivity multiplier (0.5–2.0)"),
     export_format: str = Form("json", description="Export format: json | csv | edl | all"),
+    job_id: Optional[str] = Form(None, description="Client-generated job ID for /status polling"),
 ):
     """
     Analyze a gameplay video for dead zones and hype moments.
@@ -208,56 +336,68 @@ async def analyze(
         if duration <= 0:
             raise HTTPException(status_code=422, detail="Could not determine video duration.")
 
-        # ── Split audio into two tracks in a single ffmpeg pass ───────────
+        # ── Split into chunks and process in parallel ─────────────────────
         progress_log: list[str] = []
-        progress_log.append("[split] Splitting audio into game + vocals tracks")
+        audio_track_meta: dict = {
+            "game_audio": {
+                "description": "Full-spectrum audio — dead zone detection",
+                "lowcut_hz": 0,
+                "highcut_hz": "full",
+            },
+            "vocals": {
+                "description": "Bandpass-filtered commentary — hype detection",
+                "lowcut_hz": VOCALS_LOWCUT_HZ,
+                "highcut_hz": VOCALS_HIGHCUT_HZ,
+            },
+        }
 
-        def dz_progress(pct, label):
-            progress_log.append(f"[dead_zone {pct:.0%}] {label}")
+        chunks, chunk_dir = _split_into_chunks(tmp_path)
+        num_chunks = len(chunks)
+        progress_log.append(
+            f"[chunks] Video split into {num_chunks} chunk(s) "
+            f"of up to {CHUNK_DURATION_SEC}s each"
+        )
+        logger.info("Processing %d chunk(s) in parallel", num_chunks)
 
-        def hype_progress(pct, label):
-            progress_log.append(f"[hype {pct:.0%}] {label}")
+        if job_id:
+            _init_job(job_id, num_chunks)
 
-        audio_track_meta: dict = {}
-        with split_audio(tmp_path) as tracks:
-            logger.info(
-                "Audio split: game_audio=%s  vocals=%s",
-                tracks.game_audio_path,
-                tracks.vocals_path,
-            )
-            progress_log.append(
-                f"[split] game audio → full spectrum | "
-                f"vocals → {VOCALS_LOWCUT_HZ} Hz – {VOCALS_HIGHCUT_HZ} Hz bandpass"
-            )
-            # Capture metadata before the context manager cleans up the files
-            audio_track_meta = {
-                "game_audio": {
-                    "description": "Full-spectrum audio — used for dead zone detection",
-                    "filter": tracks.game_audio_filter,
-                },
-                "vocals": {
-                    "description": "Bandpass-filtered commentary — used for hype detection",
-                    "filter": tracks.vocals_filter,
-                    "lowcut_hz": VOCALS_LOWCUT_HZ,
-                    "highcut_hz": VOCALS_HIGHCUT_HZ,
-                },
-            }
+        try:
+            loop = asyncio.get_running_loop()
+            with ThreadPoolExecutor(
+                max_workers=min(num_chunks, os.cpu_count() or 4)
+            ) as pool:
+                futures = [
+                    loop.run_in_executor(
+                        pool,
+                        functools.partial(
+                            _process_chunk,
+                            chunk_path, offset, idx, job_id,
+                            preset, dead_zone_sensitivity, hype_sensitivity,
+                        ),
+                    )
+                    for idx, (chunk_path, offset) in enumerate(chunks)
+                ]
+                chunk_results = await asyncio.gather(*futures)
+        finally:
+            if chunk_dir and os.path.exists(chunk_dir):
+                shutil.rmtree(chunk_dir, ignore_errors=True)
 
-            # Dead zones use the full-spectrum game audio track
-            dead_zones = detect_dead_zones(
-                tmp_path, preset,
-                sensitivity=dead_zone_sensitivity,
-                progress_callback=dz_progress,
-                game_audio_path=tracks.game_audio_path,
-            )
+        dead_zones: list[dict] = []
+        highlights: list[dict] = []
+        for dz_list, hl_list in chunk_results:
+            dead_zones.extend(dz_list)
+            highlights.extend(hl_list)
 
-            # Hype moments use the bandpass-filtered vocals track
-            highlights = detect_hype_moments(
-                tmp_path, preset,
-                sensitivity=hype_sensitivity,
-                progress_callback=hype_progress,
-                vocals_path=tracks.vocals_path,
-            )
+        dead_zones.sort(key=lambda x: x["start"])
+        highlights.sort(key=lambda x: x["start"])
+        progress_log.append(
+            f"[chunks] Merged {num_chunks} chunk(s): "
+            f"{len(dead_zones)} dead zones, {len(highlights)} highlights"
+        )
+
+        if job_id:
+            _finish_job(job_id)
 
         # Attach segment_hash to each detected segment so the frontend can
         # send it back as part of a /feedback call.
@@ -331,6 +471,28 @@ async def analyze(
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+@app.get("/status/{job_id}")
+def get_job_status(job_id: str):
+    """Return chunk-level progress for an in-flight /analyze job."""
+    with _job_lock:
+        job = _job_progress.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    completed = job["completed_chunks"]
+    total = job["total_chunks"]
+    if job["status"] == "analyzing":
+        current_label = f"Analyzing chunk {completed + 1} of {total}…"
+    else:
+        current_label = "Done"
+    return {
+        "total_chunks": total,
+        "completed_chunks": completed,
+        "chunk_labels": job["chunk_labels"],
+        "status": job["status"],
+        "current_label": current_label,
+    }
 
 
 @app.post("/feedback")

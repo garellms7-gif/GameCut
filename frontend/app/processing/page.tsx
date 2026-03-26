@@ -3,66 +3,60 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 
-const STAGES = [
-  { pct: 5, label: "Uploading video..." },
-  { pct: 15, label: "Extracting audio track..." },
-  { pct: 30, label: "Detecting silence intervals..." },
-  { pct: 50, label: "Analyzing video frames for static content..." },
-  { pct: 65, label: "Merging dead zone signals..." },
-  { pct: 72, label: "Extracting commentary audio..." },
-  { pct: 80, label: "Computing volume & pitch hype scores..." },
-  { pct: 88, label: "Analyzing speech rate..." },
-  { pct: 94, label: "Building edit decision list..." },
-  { pct: 98, label: "Finalizing exports..." },
-];
-
 export default function ProcessingPage() {
   const router = useRouter();
   const [progress, setProgress] = useState(5);
-  const [stage, setStage] = useState("Uploading video...");
-  const [stageIdx, setStageIdx] = useState(0);
+  const [stage, setStage] = useState("Uploading video…");
+  const [chunkInfo, setChunkInfo] = useState<{ completed: number; total: number } | null>(null);
   const [fileName, setFileName] = useState("");
   const [preset, setPreset] = useState("");
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const statusPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const donePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     setFileName(sessionStorage.getItem("gc_file_name") || "video.mp4");
     setPreset(sessionStorage.getItem("gc_preset") || "fps");
   }, []);
 
-  // Animate through stages at a realistic pace
+  // Poll the /status/{jobId} endpoint for real chunk progress
   useEffect(() => {
-    intervalRef.current = setInterval(() => {
-      setStageIdx((prev) => {
-        const next = prev + 1;
-        if (next < STAGES.length) {
-          setProgress(STAGES[next].pct);
-          setStage(STAGES[next].label);
-          return next;
-        }
-        return prev;
-      });
-    }, 2200);
+    const jobId = sessionStorage.getItem("gc_job_id");
+    if (!jobId) return;
+
+    statusPollRef.current = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/status/${jobId}`);
+        if (!r.ok) return;
+        const s = await r.json();
+        const completed: number = s.completed_chunks ?? 0;
+        const total: number = s.total_chunks ?? 1;
+        setChunkInfo({ completed, total });
+        const pct = Math.round(10 + (completed / total) * 85);
+        setProgress(pct);
+        setStage(s.current_label ?? `Analyzing chunk ${completed + 1} of ${total}…`);
+      } catch {
+        // ignore transient errors
+      }
+    }, 1000);
 
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (statusPollRef.current) clearInterval(statusPollRef.current);
     };
   }, []);
 
   // Poll sessionStorage for completion signal from the upload page
   useEffect(() => {
-    pollRef.current = setInterval(() => {
+    donePollRef.current = setInterval(() => {
       const status = sessionStorage.getItem("gc_status");
       if (status === "done") {
-        if (intervalRef.current) clearInterval(intervalRef.current);
-        clearInterval(pollRef.current!);
+        if (statusPollRef.current) clearInterval(statusPollRef.current);
+        clearInterval(donePollRef.current!);
         setProgress(100);
         setStage("Analysis complete!");
         setTimeout(() => router.push("/results"), 600);
       } else if (status === "error") {
-        if (intervalRef.current) clearInterval(intervalRef.current);
-        clearInterval(pollRef.current!);
+        if (statusPollRef.current) clearInterval(statusPollRef.current);
+        clearInterval(donePollRef.current!);
         const errMsg = sessionStorage.getItem("gc_error") || "Analysis failed";
         setStage(`Error: ${errMsg}`);
         setProgress(0);
@@ -70,7 +64,7 @@ export default function ProcessingPage() {
     }, 300);
 
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      if (donePollRef.current) clearInterval(donePollRef.current);
     };
   }, [router]);
 
@@ -122,28 +116,32 @@ export default function ProcessingPage() {
         {isError ? "" : `${progress}% complete`}
       </p>
 
-      {/* Stage list */}
-      {!isError && (
-        <div className="mt-10 w-full text-left space-y-2">
-          {STAGES.map((s, i) => (
-            <div key={i} className="flex items-center gap-3 text-sm">
+      {/* Chunk progress dots */}
+      {!isError && chunkInfo && chunkInfo.total > 1 && (
+        <div className="mt-10 w-full">
+          <p className="text-xs text-white/30 uppercase tracking-wide mb-3 text-left">
+            Chunks
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {Array.from({ length: chunkInfo.total }, (_, i) => (
               <div
-                className={`w-2 h-2 rounded-full flex-shrink-0 transition-all
-                  ${i < stageIdx ? "bg-green-500" : i === stageIdx ? "bg-indigo-400 animate-pulse" : "bg-white/10"}`}
-              />
-              <span
-                className={
-                  i < stageIdx
-                    ? "text-green-400/70 line-through"
-                    : i === stageIdx
-                    ? "text-white"
-                    : "text-white/25"
-                }
+                key={i}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono transition-all
+                  ${i < chunkInfo.completed
+                    ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                    : i === chunkInfo.completed
+                    ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 animate-pulse"
+                    : "bg-white/5 text-white/20 border border-white/10"
+                  }`}
               >
-                {s.label}
-              </span>
-            </div>
-          ))}
+                <span
+                  className={`w-1.5 h-1.5 rounded-full
+                    ${i < chunkInfo.completed ? "bg-green-500" : i === chunkInfo.completed ? "bg-indigo-400" : "bg-white/20"}`}
+                />
+                {i < chunkInfo.completed ? "✓" : `#${i + 1}`}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

@@ -14,29 +14,54 @@ export async function analyzeVideo(
   deadZoneSensitivity: number,
   hypeSensitivity: number,
   onProgress?: (pct: number, label: string) => void,
+  jobId?: string,
 ): Promise<AnalysisResult> {
+  const id = jobId ?? crypto.randomUUID();
+
   const form = new FormData();
   form.append("file", file);
   form.append("game_preset", gamePreset);
   form.append("dead_zone_sensitivity", String(deadZoneSensitivity));
   form.append("hype_sensitivity", String(hypeSensitivity));
   form.append("export_format", "all");
+  form.append("job_id", id);
 
-  // Simulate upload progress
-  onProgress?.(5, "Uploading video...");
+  onProgress?.(5, "Uploading video…");
 
-  const res = await fetch(`${API_BASE}/analyze`, {
-    method: "POST",
-    body: form,
-  });
+  // Poll /status while the blocking fetch runs
+  let pollHandle: ReturnType<typeof setInterval> | null = setInterval(async () => {
+    try {
+      const r = await fetch(`${API_BASE}/status/${id}`);
+      if (!r.ok) return;
+      const s = await r.json();
+      const completed: number = s.completed_chunks ?? 0;
+      const total: number = s.total_chunks ?? 1;
+      const pct = Math.round(10 + (completed / total) * 85);
+      onProgress?.(pct, s.current_label ?? `Analyzing chunk ${completed + 1} of ${total}…`);
+    } catch {
+      // ignore transient poll errors
+    }
+  }, 1000);
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Analysis failed");
+  try {
+    const res = await fetch(`${API_BASE}/analyze`, {
+      method: "POST",
+      body: form,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || "Analysis failed");
+    }
+
+    onProgress?.(100, "Complete");
+    return res.json();
+  } finally {
+    if (pollHandle !== null) {
+      clearInterval(pollHandle);
+      pollHandle = null;
+    }
   }
-
-  onProgress?.(100, "Complete");
-  return res.json();
 }
 
 export async function fetchPresets(): Promise<Record<string, { name: string; description: string }>> {

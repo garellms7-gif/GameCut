@@ -117,16 +117,18 @@ export default function UploadPage() {
     setLoading(true);
     setError(null);
 
+    const jobId = crypto.randomUUID();
     sessionStorage.setItem("gc_file_name", file.name);
     sessionStorage.setItem("gc_file_size", String(file.size));
     sessionStorage.setItem("gc_preset", preset);
+    sessionStorage.setItem("gc_job_id", jobId);
     sessionStorage.setItem("gc_status", "analyzing");
 
     router.push("/processing");
     await new Promise((r) => setTimeout(r, 100));
 
     try {
-      const result = await analyzeVideo(file, preset, deadSens, hypeSens);
+      const result = await analyzeVideo(file, preset, deadSens, hypeSens, undefined, jobId);
       sessionStorage.setItem("gc_result", JSON.stringify(result));
       sessionStorage.setItem("gc_status", "done");
     } catch (err: unknown) {
