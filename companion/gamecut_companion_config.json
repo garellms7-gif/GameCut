@@ -1,0 +1,17 @@
+{
+  "_comment": "GameCut Companion — copy to any name and pass with --config",
+
+  "output": "timestamps.json",
+
+  "hotkeys": {
+    "session_start": "f8",
+    "hype":          "f9",
+    "funny":         "f10",
+    "rage":          "f11",
+    "cut":           "f12"
+  },
+
+  "window_seconds": 30.0,
+
+  "verbose": true
+}

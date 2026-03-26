@@ -31,6 +31,7 @@ export async function analyzeVideo(
   hypeSensitivity: number,
   onProgress?: (pct: number, label: string) => void,
   jobId?: string,
+  companionTimestamps?: string,
 ): Promise<AnalysisResult> {
   const id = jobId ?? crypto.randomUUID();
   const base = apiBase();
@@ -42,6 +43,9 @@ export async function analyzeVideo(
   form.append("hype_sensitivity", String(hypeSensitivity));
   form.append("export_format", "all");
   form.append("job_id", id);
+  if (companionTimestamps) {
+    form.append("companion_timestamps", companionTimestamps);
+  }
 
   onProgress?.(5, "Uploading video…");
 

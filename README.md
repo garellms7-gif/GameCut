@@ -352,6 +352,76 @@ Steps:
 
 ---
 
+## GameCut Companion — Live Hotkey Logger (Windows / OBS)
+
+The **GameCut Companion** is a tiny background script that listens for hotkeys while you record in OBS and writes a `timestamps.json` file that GameCut uses to pre-seed manual markers into the EDL before AI analysis runs.
+
+### Setup (Windows)
+
+1. **Install Python 3.10+** from python.org (check "Add Python to PATH" during install).
+
+2. **Install the companion dependencies:**
+   ```cmd
+   cd companion
+   pip install -r requirements.txt
+   ```
+   > On Windows you may need to run the terminal **as Administrator** if OBS is also running elevated.
+
+3. **Start the companion before hitting Record in OBS:**
+   ```cmd
+   python gamecut_companion.py
+   ```
+   Or with a custom output path alongside the recording:
+   ```cmd
+   python gamecut_companion.py --output "D:\OBS\recordings\session.json"
+   ```
+
+4. **Press F8 the moment OBS starts recording.** This resets the elapsed timer to `0.000 s` so timestamps align with the video file.
+
+### Default hotkeys
+
+| Key | Action |
+|-----|--------|
+| F8  | Reset session timer (press when OBS starts recording) |
+| F9  | Mark hype moment |
+| F10 | Mark funny moment |
+| F11 | Mark rage / frustration |
+| F12 | Mark cut suggestion |
+
+### Avoid OBS hotkey conflicts
+
+OBS uses F-keys for its own hotkeys (Start/Stop Recording, etc.). Check **OBS → Settings → Hotkeys** and reassign any conflicting keys.  If you prefer not to move OBS hotkeys, pass custom keys to the companion:
+
+```cmd
+python gamecut_companion.py --hotkeys start=F4 hype=F5 funny=F6 rage=F7 cut=F8
+```
+
+Or store them permanently in a config file:
+
+```json
+{
+  "output": "C:/OBS/recordings/session.json",
+  "hotkeys": {
+    "session_start": "f4",
+    "hype":  "f5",
+    "funny": "f6",
+    "rage":  "f7",
+    "cut":   "f8"
+  },
+  "window_seconds": 30.0
+}
+```
+
+```cmd
+python gamecut_companion.py --config my_config.json
+```
+
+### Using timestamps in GameCut
+
+After the recording session, open GameCut, upload the video, then click **"Load timestamps.json from GameCut Companion…"** and select the JSON file the companion wrote.  Manual markers are merged with AI analysis before the EDL is built — `hype`/`funny`/`rage` events create 30-second highlight windows; `cut` events create 5-second dead zones.
+
+---
+
 ## Troubleshooting
 
 **`librosa` install fails on Apple Silicon**

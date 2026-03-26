@@ -242,6 +242,82 @@ def _process_chunk(
     return dead_zones, highlights
 
 
+# ── Companion timestamps helpers ───────────────────────────────────────────────
+
+def _companion_to_segments(
+    timestamps_data: dict,
+    video_duration: float,
+    *,
+    window_before: float = 10.0,
+    window_after: float = 20.0,
+    cut_half_window: float = 2.5,
+) -> tuple[list[dict], list[dict]]:
+    """Convert gamecut_companion.py events to dead_zone / highlight dicts.
+
+    Args:
+        timestamps_data: Parsed contents of timestamps.json.
+        video_duration:  Duration of the source video in seconds.
+        window_before:   Seconds before the marked point to start a highlight clip.
+        window_after:    Seconds after the marked point to end a highlight clip.
+        cut_half_window: Half-width of the dead_zone window for "cut" markers.
+
+    Returns:
+        (manual_dead_zones, manual_highlights) — ready to merge with AI results.
+    """
+    offset   = float(timestamps_data.get("offset_seconds", 0.0))
+    win      = float(timestamps_data.get("window_seconds", window_before + window_after))
+    wb       = window_before
+    wa       = win - wb  # keep proportions if window_seconds was overridden
+
+    dead_zones: list[dict] = []
+    highlights: list[dict] = []
+
+    for ev in timestamps_data.get("events", []):
+        t     = float(ev.get("elapsed_seconds", 0.0)) + offset
+        etype = str(ev.get("type", "hype")).lower()
+        hkey  = ev.get("hotkey", "")
+
+        if t < 0 or t > video_duration:
+            logger.warning(
+                "Companion event at %.1fs is outside video duration (%.1fs) — skipping",
+                t, video_duration,
+            )
+            continue
+
+        if etype == "cut":
+            start = max(0.0, t - cut_half_window)
+            end   = min(video_duration, t + cut_half_window)
+            dead_zones.append({
+                "start":       start,
+                "end":         end,
+                "duration":    end - start,
+                "type":        "dead_zone",
+                "source":      "manual",
+                "manual_type": "cut",
+                "hotkey":      hkey,
+                "confidence":  1.0,
+            })
+        else:
+            # hype / funny / rage → highlight window
+            start = max(0.0, t - wb)
+            end   = min(video_duration, t + wa)
+            highlights.append({
+                "start":             start,
+                "end":               end,
+                "duration":          end - start,
+                "type":              "highlight",
+                "source":            "manual",
+                "manual_type":       etype,
+                "hotkey":            hkey,
+                "composite_score":   1.0,
+                "volume_score":      0.0,
+                "pitch_score":       0.0,
+                "speech_rate_score": 0.0,
+            })
+
+    return dead_zones, highlights
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -318,6 +394,10 @@ async def analyze(
     hype_sensitivity: float = Form(1.0, description="Hype detection sensitivity multiplier (0.5–2.0)"),
     export_format: str = Form("json", description="Export format: json | csv | edl | all"),
     job_id: Optional[str] = Form(None, description="Client-generated job ID for /status polling"),
+    companion_timestamps: Optional[str] = Form(
+        None,
+        description="JSON string from gamecut_companion.py — pre-seeds the EDL with manual markers",
+    ),
 ):
     """
     Analyze a gameplay video for dead zones and hype moments.
@@ -432,16 +512,41 @@ async def analyze(
         if job_id:
             _finish_job(job_id)
 
-        # Attach segment_hash to each detected segment so the frontend can
-        # send it back as part of a /feedback call.
+        # ── Merge companion manual markers (if supplied) ───────────────────
+        manual_markers: list[dict] = []
+        if companion_timestamps:
+            try:
+                cts_data = json.loads(companion_timestamps)
+                manual_dz, manual_hl = _companion_to_segments(cts_data, duration)
+                logger.info(
+                    "Companion timestamps: %d manual dead_zones, %d manual highlights",
+                    len(manual_dz), len(manual_hl),
+                )
+                # Manual markers take priority: prepend so highlights override AI dead_zones
+                dead_zones  = manual_dz  + dead_zones
+                highlights  = manual_hl + highlights
+                dead_zones.sort(key=lambda x: x["start"])
+                highlights.sort(key=lambda x: x["start"])
+                manual_markers = manual_dz + manual_hl
+                progress_log.append(
+                    f"[companion] Merged {len(manual_dz)} manual cuts "
+                    f"and {len(manual_hl)} manual highlights from timestamps.json"
+                )
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                logger.warning("Could not parse companion_timestamps: %s", e)
+                progress_log.append(f"[companion] WARNING: could not parse timestamps — {e}")
+
+        # Attach segment_hash to AI-detected segments only (manual ones have source="manual")
         for dz in dead_zones:
-            dz["segment_hash"] = segment_hash(
-                game_preset, "dead_zone", dz.get("confidence"), dz["duration"]
-            )
+            if dz.get("source") != "manual":
+                dz["segment_hash"] = segment_hash(
+                    game_preset, "dead_zone", dz.get("confidence"), dz["duration"]
+                )
         for hl in highlights:
-            hl["segment_hash"] = segment_hash(
-                game_preset, "highlight", hl.get("composite_score"), hl["duration"]
-            )
+            if hl.get("source") != "manual":
+                hl["segment_hash"] = segment_hash(
+                    game_preset, "highlight", hl.get("composite_score"), hl["duration"]
+                )
 
         # Post-process: group clustered dead zones into struggle zones
         struggle_zones = detect_struggle_zones(dead_zones)
@@ -465,6 +570,7 @@ async def analyze(
             "dead_zones": dead_zones,
             "highlights": highlights,
             "struggle_zones": struggle_zones,
+            "manual_markers": manual_markers,
             "edl": edl,
             "progress_log": progress_log,
         }

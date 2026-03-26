@@ -47,6 +47,9 @@ export interface DeadZone {
   type: "dead_zone";
   confidence: number;
   segment_hash?: string;
+  source?: "ai" | "manual";
+  manual_type?: string;
+  hotkey?: string;
 }
 
 export interface Highlight {
@@ -59,6 +62,19 @@ export interface Highlight {
   pitch_score: number;
   speech_rate_score: number;
   segment_hash?: string;
+  source?: "ai" | "manual";
+  manual_type?: string;
+  hotkey?: string;
+}
+
+export interface ManualMarker {
+  type: "dead_zone" | "highlight";
+  start: number;
+  end: number;
+  duration: number;
+  source: "manual";
+  manual_type: string;
+  hotkey?: string;
 }
 
 export type FeedbackVote = "up" | "down";
@@ -101,6 +117,7 @@ export interface AnalysisResult {
   dead_zones: DeadZone[];
   highlights: Highlight[];
   struggle_zones: StruggleZone[];
+  manual_markers?: ManualMarker[];
   edl: Edl;
   progress_log: string[];
   threshold_adjustments?: Record<string, ThresholdAdjustment>;

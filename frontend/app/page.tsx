@@ -36,6 +36,10 @@ export default function UploadPage() {
   const [presetDescs, setPresetDescs] = useState<Record<string, string>>({});
   const [loading, setLoading]         = useState(false);
   const [error, setError]             = useState<string | null>(null);
+  // Optional companion timestamps JSON
+  const [companionJson, setCompanionJson]   = useState<string | null>(null);
+  const [companionName, setCompanionName]   = useState<string | null>(null);
+  const companionRef = useRef<HTMLInputElement>(null);
 
   // Auto-detect state
   const [autoMode, setAutoMode]               = useState(true);
@@ -150,7 +154,7 @@ export default function UploadPage() {
     await new Promise((r) => setTimeout(r, 100));
 
     try {
-      const result = await analyzeVideo(fileOrPath, preset, deadSens, hypeSens, undefined, jobId);
+      const result = await analyzeVideo(fileOrPath, preset, deadSens, hypeSens, undefined, jobId, companionJson ?? undefined);
       sessionStorage.setItem("gc_result", JSON.stringify(result));
       sessionStorage.setItem("gc_status", "done");
     } catch (err: unknown) {
@@ -346,6 +350,66 @@ export default function UploadPage() {
           leftLabel="More highlights"
           rightLabel="Fewer highlights"
         />
+      </div>
+
+      {/* ── Companion timestamps (optional) ─────────────────────────── */}
+      <div className="mt-6">
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-sm font-medium text-white/70">
+            Companion Timestamps
+            <span className="ml-2 text-xs text-white/30 font-normal">optional</span>
+          </label>
+          {companionName && (
+            <button
+              onClick={() => { setCompanionJson(null); setCompanionName(null); }}
+              className="text-xs text-white/30 hover:text-white/60 transition-colors"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+        <input
+          ref={companionRef}
+          type="file"
+          accept=".json,application/json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const text = ev.target?.result as string;
+              try {
+                JSON.parse(text); // validate
+                setCompanionJson(text);
+                setCompanionName(f.name);
+              } catch {
+                setCompanionJson(null);
+                setCompanionName(null);
+              }
+            };
+            reader.readAsText(f);
+          }}
+        />
+        <button
+          onClick={() => companionRef.current?.click()}
+          className={`w-full py-2.5 px-4 rounded-lg border text-sm text-left transition-all
+            ${companionName
+              ? "border-green-500/40 bg-green-500/5 text-green-400"
+              : "border-white/10 bg-white/3 text-white/35 hover:border-white/25 hover:text-white/55"
+            }`}
+        >
+          {companionName ? (
+            <span>timestamps.json: <span className="font-mono">{companionName}</span></span>
+          ) : (
+            "Load timestamps.json from GameCut Companion…"
+          )}
+        </button>
+        {companionName && (
+          <p className="text-xs text-white/30 mt-1 pl-1">
+            Manual hotkey markers will be pre-seeded into the edit decision list.
+          </p>
+        )}
       </div>
 
       {error && (
